@@ -1,0 +1,24 @@
+{
+  "tag": "rejected",
+  "parent": "perf-v0",
+  "change": "GET /bench body via memfd and sendfile. First with TCP_CORK around the response, then without.",
+  "kept": false,
+  "reason": "Linux correctness tests passed, including exact 0xA5 bodies. Both variants were slower than writing the hot 256 KiB buffer and used more CPU on the server and the client. The copy into the socket is cheaper than sendfile for this size.",
+  "workload": "loopback GET 262144 bytes, 24 connections, pipe 262144, 10 seconds, 3 runs",
+  "with_cork": {
+    "runs": [
+      {"gbps": 15.250, "rps": 7808.1, "errors": 0, "p50_us": 3000, "p99_us": 13000, "max_us": 24938, "server_cores": 0.345, "client_cores": 0.781},
+      {"gbps": 15.254, "rps": 7810.3, "errors": 0, "p50_us": 3000, "p99_us": 13800, "max_us": 27937, "server_cores": 0.346, "client_cores": 0.777},
+      {"gbps": 15.122, "rps": 7742.6, "errors": 0, "p50_us": 3000, "p99_us": 13200, "max_us": 31490, "server_cores": 0.344, "client_cores": 0.773}
+    ],
+    "median": {"gbps": 15.250, "server_cores": 0.345, "client_cores": 0.777, "p50_us": 3000, "p99_us": 13200}
+  },
+  "no_cork": {
+    "runs": [
+      {"gbps": 14.993, "rps": 7676.6, "errors": 0, "p50_us": 3000, "p99_us": 14200, "max_us": 32495, "server_cores": 0.337, "client_cores": 0.762},
+      {"gbps": 15.208, "rps": 7786.7, "errors": 0, "p50_us": 3000, "p99_us": 14000, "max_us": 26562, "server_cores": 0.341, "client_cores": 0.771},
+      {"gbps": 15.073, "rps": 7717.2, "errors": 0, "p50_us": 3000, "p99_us": 13800, "max_us": 29126, "server_cores": 0.337, "client_cores": 0.767}
+    ],
+    "median": {"gbps": 15.073, "server_cores": 0.337, "client_cores": 0.767, "p50_us": 3000, "p99_us": 14000}
+  }
+}

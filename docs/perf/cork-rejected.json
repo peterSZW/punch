@@ -1,0 +1,14 @@
+{
+  "tag": "rejected",
+  "parent": "perf-v0",
+  "change": "TCP_CORK around splice bursts, cleared before the task waits or shuts a direction down",
+  "kept": false,
+  "reason": "Correct on the Linux splice path, including the one-byte flush. Median throughput 15.688 Gbit/s versus 15.627 at perf-v0, inside run noise. Server CPU rose from 0.259 to 0.271 cores.",
+  "workload": "loopback GET 262144 bytes, 24 connections, pipe 262144, 10 seconds, 3 runs",
+  "runs": [
+    {"gbps": 15.254, "rps": 7809.8, "errors": 0, "p50_us": 2800, "p99_us": 15000, "max_us": 28779, "server_cores": 0.268, "client_cores": 0.690},
+    {"gbps": 15.688, "rps": 8032.4, "errors": 0, "p50_us": 2800, "p99_us": 14600, "max_us": 32835, "server_cores": 0.274, "client_cores": 0.706},
+    {"gbps": 15.720, "rps": 8048.8, "errors": 0, "p50_us": 2800, "p99_us": 15000, "max_us": 32613, "server_cores": 0.271, "client_cores": 0.714}
+  ],
+  "median": {"gbps": 15.688, "server_cores": 0.271, "client_cores": 0.706, "p50_us": 2800, "p99_us": 15000}
+}

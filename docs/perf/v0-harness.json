@@ -1,0 +1,30 @@
+{
+  "tag": "perf-v0",
+  "commit": "b053d7b",
+  "kept": true,
+  "build": "release, lto off, codegen-units 16",
+  "workload": "loopback GET 262144 bytes, 24 connections, 10 seconds, 3 runs after a 2 second warmup",
+  "note": "Same binary. Only tcp.pipe_size changed. Median is the middle run by gbps. Default stays 262144: 1 MiB was under a 3% throughput gain and pins more kernel memory; 4 MiB was not faster than 1 MiB.",
+  "runs": {
+    "262144": [
+      {"gbps": 15.627, "rps": 8001.0, "errors": 0, "p50_us": 2800, "p99_us": 15200, "max_us": 33252, "server_cores": 0.259, "client_cores": 0.686},
+      {"gbps": 15.522, "rps": 7947.3, "errors": 0, "p50_us": 2800, "p99_us": 15200, "max_us": 26279, "server_cores": 0.255, "client_cores": 0.683},
+      {"gbps": 15.695, "rps": 8035.8, "errors": 0, "p50_us": 2800, "p99_us": 15000, "max_us": 31841, "server_cores": 0.259, "client_cores": 0.690}
+    ],
+    "1048576": [
+      {"gbps": 15.918, "rps": 8149.8, "errors": 0, "p50_us": 2600, "p99_us": 15400, "max_us": 33635, "server_cores": 0.247, "client_cores": 0.697},
+      {"gbps": 15.891, "rps": 8136.1, "errors": 0, "p50_us": 2800, "p99_us": 15000, "max_us": 33702, "server_cores": 0.245, "client_cores": 0.695},
+      {"gbps": 16.023, "rps": 8203.7, "errors": 0, "p50_us": 2600, "p99_us": 15000, "max_us": 31423, "server_cores": 0.249, "client_cores": 0.702}
+    ],
+    "4194304": [
+      {"gbps": 15.578, "rps": 7975.9, "errors": 0, "p50_us": 2600, "p99_us": 15200, "max_us": 34806, "server_cores": 0.238, "client_cores": 0.683},
+      {"gbps": 15.941, "rps": 8161.7, "errors": 0, "p50_us": 2600, "p99_us": 15200, "max_us": 33024, "server_cores": 0.245, "client_cores": 0.697},
+      {"gbps": 15.890, "rps": 8135.8, "errors": 0, "p50_us": 2600, "p99_us": 15200, "max_us": 32921, "server_cores": 0.246, "client_cores": 0.695}
+    ]
+  },
+  "median": {
+    "262144": {"gbps": 15.627, "server_cores": 0.259, "client_cores": 0.686, "p50_us": 2800, "p99_us": 15200},
+    "1048576": {"gbps": 15.918, "server_cores": 0.247, "client_cores": 0.697, "p50_us": 2600, "p99_us": 15000},
+    "4194304": {"gbps": 15.890, "server_cores": 0.245, "client_cores": 0.695, "p50_us": 2600, "p99_us": 15200}
+  }
+}
