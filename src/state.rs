@@ -7,16 +7,11 @@ use std::sync::{Arc, Mutex};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot, watch};
 
+use crate::catalog::{self, ClientRecord, SavedMap};
 use crate::config::TcpTune;
 use crate::proto::CtrlMsg;
 use crate::util::{self, lock};
 use crate::{info, warn};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Origin {
-    Cli,
-    Api,
-}
 
 #[derive(Debug)]
 pub struct MapAck {
@@ -30,6 +25,7 @@ pub struct Client {
     pub addr: String,
     pub connected_ms: u64,
     pub token: [u8; 16],
+    pub allow_maps: AtomicBool,
     pub ctrl: mpsc::UnboundedSender<CtrlMsg>,
     pub idle: Mutex<VecDeque<TcpStream>>,
     pub pending_streams: Mutex<HashMap<u32, oneshot::Sender<Result<TcpStream, String>>>>,
@@ -40,13 +36,11 @@ pub struct Client {
 pub struct MapState {
     pub id: u32,
     pub client_name: String,
-    pub origin: Origin,
-    pub bind_ip: String,
-    pub requested_port: u16,
+    pub bind_ip: Mutex<String>,
     pub bind_port: AtomicU16,
     pub target_host: Mutex<String>,
     pub target_port: AtomicU16,
-    pub stop: watch::Sender<bool>,
+    pub stop: Mutex<watch::Sender<bool>>,
     pub active: AtomicU64,
     pub bytes_in: AtomicU64,
     pub bytes_out: AtomicU64,
@@ -55,14 +49,13 @@ pub struct MapState {
     pub last_error: Mutex<String>,
     pub last_error_ms: AtomicU64,
     pub last_event_ms: AtomicU64,
-    pub stale: AtomicBool,
 }
 
 impl MapState {
     pub fn bind_text(&self) -> String {
         format!(
             "{}:{}",
-            self.bind_ip,
+            lock(&self.bind_ip),
             self.bind_port.load(Ordering::Relaxed)
         )
     }
@@ -91,12 +84,15 @@ pub struct OpenReq {
     pub bind_port: u16,
     pub target_host: String,
     pub target_port: u16,
-    pub origin: Origin,
+    pub fixed_id: Option<u32>,
+    pub persist: bool,
 }
 
 pub struct App {
     pub api_key: Mutex<String>,
     pub config_path: PathBuf,
+    pub catalog_path: PathBuf,
+    pub records: Mutex<Vec<ClientRecord>>,
     pub tcp: TcpTune,
     pub pipe_size: usize,
     pub max_idle: usize,
@@ -180,50 +176,60 @@ impl App {
         map.last_error_ms.store(0, Ordering::Relaxed);
     }
 
-    pub fn mark_cli_stale(&self, name: &str) {
-        for map in lock(&self.maps).values() {
-            if map.origin == Origin::Cli && map.client_name == name {
-                map.stale.store(true, Ordering::Relaxed);
-            }
-        }
+    pub fn find_record(&self, name: &str) -> Option<ClientRecord> {
+        lock(&self.records).iter().find(|r| r.name == name).cloned()
     }
 
-    pub fn stale_cli_ids(&self, name: &str) -> Vec<u32> {
-        lock(&self.maps)
-            .values()
-            .filter(|m| m.origin == Origin::Cli && m.client_name == name && m.stale.load(Ordering::Relaxed))
-            .map(|m| m.id)
-            .collect()
-    }
-
-    pub fn find_cli_reuse(&self, req: &OpenReq) -> Option<Arc<MapState>> {
-        if req.origin != Origin::Cli {
-            return None;
-        }
-        lock(&self.maps).values().find(|m| {
-            m.origin == Origin::Cli
-                && m.client_name == req.client_name
-                && m.bind_ip == req.bind_ip
-                && m.requested_port == req.bind_port
-        }).cloned()
+    pub fn find_secret(&self, secret: &str) -> Option<ClientRecord> {
+        lock(&self.records)
+            .iter()
+            .find(|r| util::keys_equal(&r.secret, secret))
+            .cloned()
     }
 
     pub fn find_listener(&self, ip: &str, port: u16) -> Option<Arc<MapState>> {
-        lock(&self.maps).values().find(|m| {
-            m.bind_ip == ip && m.bind_port.load(Ordering::Relaxed) == port
-        }).cloned()
+        lock(&self.maps)
+            .values()
+            .find(|m| {
+                lock(&m.bind_ip).as_str() == ip && m.bind_port.load(Ordering::Relaxed) == port
+            })
+            .cloned()
     }
 
+    /// 同一把 secret 只能留一条控制连接。新的连上时，旧机器收到通知后退出，不再重连。
     pub fn insert_client(&self, client: Arc<Client>) {
         let mut names = lock(&self.by_name);
         if let Some(old_id) = names.insert(client.name.clone(), client.id) {
             if let Some(old) = lock(&self.clients).remove(&old_id) {
-                let _ = old.cancel.send(true);
                 fail_client_waiters(&old);
+                let _ = old.ctrl.send(CtrlMsg::Superseded {
+                    message: "这个 secret 已经在另一台机器上登录".into(),
+                });
                 info!("replaced previous session client={} id={}", old.name, old.id);
             }
         }
+        drop(names);
         lock(&self.clients).insert(client.id, client);
+    }
+
+    pub fn save_catalog(&self) -> Result<(), String> {
+        if self.catalog_path.as_os_str().is_empty() {
+            return Ok(());
+        }
+        let clients = lock(&self.records).clone();
+        let mut maps: Vec<SavedMap> = lock(&self.maps)
+            .values()
+            .map(|m| SavedMap {
+                id: m.id,
+                client_name: m.client_name.clone(),
+                bind_ip: lock(&m.bind_ip).clone(),
+                bind_port: m.bind_port.load(Ordering::Relaxed),
+                target_host: lock(&m.target_host).clone(),
+                target_port: m.target_port.load(Ordering::Relaxed),
+            })
+            .collect();
+        maps.sort_by_key(|m| m.id);
+        catalog::save(&self.catalog_path, &clients, &maps).map_err(|err| err.to_string())
     }
 
     pub fn disconnect_client(&self, id: u64, name: &str) {

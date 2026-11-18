@@ -28,13 +28,22 @@ punch server -c /var/local/punch/punch-server.yaml
 
 ## 客户端
 
+管理员先在管理页建一个客户端，拿到名字和 secret。同一把 secret 只能有一台机器连着，后来的登录会让原来的那台退出，并且不再重连。
+
 ```bash
-punch client --server HOST:8024 --key API_KEY --name edge \
-  --map 0.0.0.0:8080=10.0.0.8:80 \
-  --map 127.0.0.1:2222=192.168.1.9:22
+punch client --server HOST:8024 --secret SECRET
 ```
 
-`--map` 可以重复。等号左边是服务端要监听的 `ip:port`，右边是客户端能访问的 `host:port`。`--name` 省略时用主机名。同名新连接会替换旧会话。
+连接命令不能带 `-m`。映射由管理页保存。如果这个客户端被允许自己改映射，连上之后可以：
+
+```bash
+punch map list
+punch map add 0.0.0.0:8080=10.0.0.8:80
+punch map update 3 0.0.0.0:8080=10.0.0.9:80
+punch map del 3
+```
+
+管理页改完会立刻下发。客户端离线时映射也留着，下次连上自动用最新的。
 
 映射也可以从服务端开：
 
@@ -55,7 +64,7 @@ curl -k -H "X-Api-Key: API_KEY" -H "Content-Type: application/json" \
 ## 压测
 
 ```bash
-punch client --server HOST:8024 --key API_KEY \
+punch client --server HOST:8024 --secret SECRET \
   --bench 127.0.0.1:19090 --expose-bench 0.0.0.0:18080
 
 wrk -t4 -c256 -d30s http://HOST:18080/bench?size=1048576
@@ -65,7 +74,7 @@ wrk -t4 -c256 -d30s http://HOST:18080/bench?size=1048576
 
 ## 部署
 
-`deploy.sh` 把当前目录 rsync 到服务器，在服务器上编译，并重启 systemd 服务。已有的 `punch-server.yaml` 和 `certs/` 不会被覆盖。
+`deploy.sh` 会做这几件事：在本机编译 macOS 和 Windows 客户端，把仓库同步到服务器，在服务器上编译服务端和 Linux 客户端，重启服务，并更新管理页的三个下载。已有的 `punch-server.yaml`、`certs/` 和 `punch-clients.json` 不会被覆盖。
 
 主机和端口不要写进仓库。放在环境变量里，或写在 `deploy.local.env`（这个文件已被忽略）：
 

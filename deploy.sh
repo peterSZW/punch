@@ -2,7 +2,8 @@
 # 把本机仓库同步到服务器，编译，并用 systemd 重启。
 # 下次部署：./deploy.sh
 # 主机写在环境变量 PUNCH_HOST，或写在未纳入版本库的 deploy.local.env。
-# 已有的 yaml 和证书不会被覆盖。
+# 已有的 yaml、证书和 punch-clients.json 不会被覆盖。
+# 本机会先编出 macOS 和 Windows 客户端，服务器再编出 Linux 客户端，放进 dist/。
 
 set -euo pipefail
 
@@ -92,6 +93,20 @@ YAML
   export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
   cargo build --release --locked
 
+  mkdir -p "$DEST/dist"
+  if [[ ! -f /usr/lib64/libssl.a || ! -f /usr/lib64/libcrypto.a ]]; then
+    dnf install -y openssl-static >/dev/null 2>&1 || true
+  fi
+  if [[ -f /usr/lib64/libssl.a && -f /usr/lib64/libcrypto.a ]]; then
+    PUNCH_OPENSSL_STATIC=1 OPENSSL_LIB_DIR=/usr/lib64 \
+      CARGO_TARGET_DIR=/tmp/punch-static \
+      cargo build --release --locked
+    install -m 0755 /tmp/punch-static/release/punch "$DEST/dist/punch-linux"
+  else
+    echo "PUNCH_LINUX_DOWNLOAD=dynamic"
+    install -m 0755 target/release/punch "$DEST/dist/punch-linux"
+  fi
+
   install -d /etc/systemd/system
   cat > /etc/systemd/system/punch.service << UNIT
 [Unit]
@@ -138,11 +153,68 @@ if [[ -z "$HOST" ]]; then
   exit 1
 fi
 
+build_client_downloads() {
+  mkdir -p "$ROOT/dist"
+  local mac_log win_log mac_pid win_pid failed=0
+  mac_log="$(mktemp)"
+  win_log="$(mktemp)"
+  (
+    cd "$ROOT"
+    local ssl_lib="${OPENSSL_MAC_LIB:-/opt/homebrew/opt/openssl@3/lib}"
+    if [[ ! -f "$ssl_lib/libssl.a" ]]; then
+      echo "找不到 macOS 的静态 OpenSSL：$ssl_lib/libssl.a" >&2
+      exit 1
+    fi
+    PUNCH_OPENSSL_STATIC=1 OPENSSL_LIB_DIR="$ssl_lib" \
+      cargo build --release --locked
+    cp -f target/release/punch dist/punch-macos
+    chmod +x dist/punch-macos
+  ) >"$mac_log" 2>&1 &
+  mac_pid=$!
+  (
+    cd "$ROOT"
+    export PATH="/opt/homebrew/opt/mingw-w64/bin:/opt/homebrew/bin:${PATH:-/usr/bin}"
+    unset CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER || true
+    if [[ ! -f /tmp/openssl-win/lib/libssl.a ]]; then
+      echo "找不到 Windows 的静态 OpenSSL：/tmp/openssl-win/lib/libssl.a" >&2
+      exit 1
+    fi
+    if ! command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
+      echo "找不到 x86_64-w64-mingw32-gcc" >&2
+      exit 1
+    fi
+    PUNCH_OPENSSL_STATIC=1 OPENSSL_LIB_DIR=/tmp/openssl-win/lib \
+      CARGO_TARGET_DIR="$ROOT/target-windows" \
+      cargo build --release --locked --target x86_64-pc-windows-gnu
+    cp -f "$ROOT/target-windows/x86_64-pc-windows-gnu/release/punch.exe" "$ROOT/dist/punch-windows.exe"
+  ) >"$win_log" 2>&1 &
+  win_pid=$!
+  if ! wait "$mac_pid"; then
+    echo "macOS 客户端编译失败" >&2
+    cat "$mac_log" >&2
+    failed=1
+  fi
+  if ! wait "$win_pid"; then
+    echo "Windows 客户端编译失败" >&2
+    cat "$win_log" >&2
+    failed=1
+  fi
+  rm -f "$mac_log" "$win_log"
+  if [[ "$failed" -ne 0 ]]; then
+    exit 1
+  fi
+}
+
+build_client_downloads
+
 echo "sync ${ROOT}/ -> ${HOST}:${DEST}/"
 rsync -az --delete \
   --exclude '.git/' \
   --exclude 'target/' \
+  --exclude 'target-windows/' \
   --exclude 'punch-server.yaml' \
+  --exclude 'punch-clients.json' \
+  --exclude '*.client.addr' \
   --exclude 'certs/' \
   --exclude 'deploy.local.env' \
   -e "ssh -o BatchMode=yes" \
@@ -150,3 +222,6 @@ rsync -az --delete \
 
 ssh -o BatchMode=yes "$HOST" \
   "bash $(printf '%q' "$DEST/deploy.sh") --remote $(printf '%q ' "$DEST" "$CONTROL_PORT" "$DATA_PORT" "$WEB_PORT")"
+
+scp -o BatchMode=yes "$HOST:$DEST/dist/punch-linux" "$ROOT/dist/punch-linux"
+chmod +x "$ROOT/dist/punch-linux"

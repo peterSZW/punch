@@ -219,15 +219,14 @@
   <ul>
     <li>服务端可以监听 <code>0.0.0.0</code>（对外）或 <code>127.0.0.1</code>（只本机）。控制端口、数据端口、管理页、每一条映射都可以单独选。</li>
     <li>目标不限于客户端本机。客户端能解析、能连上的地址都可以，例如 <code>10.0.0.8:80</code>、<code>192.168.1.9:22</code>。</li>
-    <li>映射可以用客户端命令行登记，也可以用服务端的 HTTPS 接口开。两边共用同一把 api key。</li>
+    <li>映射保存在服务端。管理员在管理页里新增、修改和删除。被允许的客户端连上之后，也可以用 <code>punch map</code> 改自己的映射。</li>
     <li>客户端拨目标失败时，原因会回到服务端，管理页和 <code>/api/events</code> 都能看到。</li>
   </ul>
 
   <h2 id="start">跑起来</h2>
   <p>发布二进制是 <code>target/release/punch</code>。第一次执行服务端时，当前目录没有 <code>punch-server.yaml</code> 就会生成配置，并写一份自签名证书。终端会打出 api key，只在生成那一次出现。</p>
   <pre><code>punch server
-punch client --server 127.0.0.1:8024 --key &lt;api_key&gt; \
-  --map 0.0.0.0:18080=10.0.0.8:80</code></pre>
+punch client --server 127.0.0.1:8024 --secret &lt;secret&gt;</code></pre>
   <p>然后访问 <code>http://&lt;服务端&gt;:18080</code>，连接会到客户端能访问的 <code>10.0.0.8:80</code>。管理页是 <code>https://&lt;服务端&gt;:8443/</code>，证书域名是 <code>localhost</code>，浏览器需要信任这张自签名证书。</p>
   <div class="note">默认端口：控制 <code>0.0.0.0:8024</code>，数据 <code>0.0.0.0:8025</code>，管理页 <code>0.0.0.0:8443</code>。客户端连的是控制端口。数据端口由服务端在握手里告诉客户端，客户端用同一台机器的地址去连。</div>
 
@@ -250,15 +249,17 @@ punch client --server 127.0.0.1:8024 --key &lt;api_key&gt; \
   <p>每条接受或拨出的 TCP 都会打开 <code>TCP_NODELAY</code>，发送和接收缓冲默认 4MB，并打开 keepalive。进程会尽量把可打开文件数抬到 100 万（不超过系统硬限制）。</p>
 
   <h2 id="map">端口映射</h2>
-  <h3>客户端命令行</h3>
-  <p><code>--map</code> 可以写多次。等号左边是服务端要监听的地址，右边是客户端要拨的目标。</p>
-  <pre><code>punch client --server 10.0.0.1:8024 --key KEY --name edge \
-  --map 0.0.0.0:8080=10.0.0.8:80 \
-  --map 127.0.0.1:2222=192.168.1.9:22</code></pre>
+  <p>映射全部由服务端保存，在配置旁边的 <code>punch-clients.json</code> 里。客户端连接时不能带 <code>-m</code>。管理员改完之后，在线客户端马上改用新的监听和目标；客户端不在线时映射留着，下次连上会收到全部最新配置。</p>
+  <h3>客户端自己改</h3>
+  <p>先运行 <code>punch client</code>。只有管理页允许「自己改映射」的客户端，才能在另一条命令里增删改。</p>
+  <pre><code>punch map list
+punch map add 0.0.0.0:8080=10.0.0.8:80
+punch map update 3 0.0.0.0:8080=10.0.0.9:80
+punch map del 3</code></pre>
   <ul>
-    <li><code>--name</code> 省略时用本机主机名。服务端按这个名字把映射交给对应的客户端。</li>
-    <li>命令行映射在客户端重连时会按原样再登记一次。同一条（同一个客户端、同一个监听地址）不会重复绑端口，只会更新目标。</li>
-    <li>客户端换了一批 <code>--map</code> 再连上来时，这个名字下没再出现的命令行映射会被关掉。用接口开的映射会留着。</li>
+    <li>等号左边是服务端要监听的 <code>ip:port</code>，右边是客户端能访问的 <code>host:port</code>。</li>
+    <li>当前目录有多个客户端时，用 <code>punch map --addr 127.0.0.1:端口</code> 指定。端口在客户端连上时打印。</li>
+    <li>服务端没允许时，命令失败，原文是「服务端没有允许这个客户端自己改映射」。</li>
   </ul>
   <h3>服务端接口</h3>
   <p>客户端在线时，可以用管理页或下面的请求增加一条。客户端当时不在线也可以先开：监听先起来，等这个名字的客户端回来再开始转发。</p>
@@ -294,7 +295,7 @@ pool:
     <tbody>
       <tr><td><code>control_listen</code></td><td>客户端连入的控制端口。</td></tr>
       <tr><td><code>data_listen</code></td><td>数据连接端口。客户端使用握手里返回的实际端口。</td></tr>
-      <tr><td><code>api_key</code></td><td>客户端 <code>--key</code> 和管理接口共用，去掉首尾空白后至少 8 个字符。</td></tr>
+      <tr><td><code>api_key</code></td><td>只给管理页。客户端用各自的 secret 登录，不使用这把 key。去掉首尾空白后至少 8 个字符。</td></tr>
       <tr><td><code>web.listen</code></td><td>HTTPS 管理页。</td></tr>
       <tr><td><code>web.cert</code> / <code>web.key</code></td><td>nginx 那两份 PEM：<code>ssl_certificate</code> 和 <code>ssl_certificate_key</code>。</td></tr>
       <tr><td><code>tcp.pipe_size</code></td><td>Linux splice 用的管道容量，限制在 64KB 到 4MB。越大单连接越不容易被管道堵住，内核内存也越高。</td></tr>
@@ -310,11 +311,9 @@ pool:
     <thead><tr><th>参数</th><th>作用</th></tr></thead>
     <tbody>
       <tr><td><code>-s, --server HOST:PORT</code></td><td>服务端控制地址。可以是 IP，也可以是能解析的域名。</td></tr>
-      <tr><td><code>-k, --key KEY</code></td><td>配置里的 <code>api_key</code>。</td></tr>
-      <tr><td><code>-n, --name NAME</code></td><td>客户端名字，1 到 64 字节。默认主机名。同名新连接会替换旧会话。</td></tr>
-      <tr><td><code>-m, --map BIND=TARGET</code></td><td>可重复。BIND 是 <code>ip:port</code>，TARGET 是 <code>host:port</code>。</td></tr>
+      <tr><td><code>--secret SECRET</code></td><td>管理页给这个客户端分配的 secret。8 到 128 个字符。同一把 secret 只能有一台机器连着，后来的登录会让原来的退出并且不再重连。</td></tr>
       <tr><td><code>--bench ADDR</code></td><td>在客户端开一个明文 HTTP，用来压测隧道。</td></tr>
-      <tr><td><code>--expose-bench BIND</code></td><td>把上面的 HTTP 映射到服务端的 BIND。需要同时写 <code>--bench</code>。</td></tr>
+      <tr><td><code>--expose-bench BIND</code></td><td>把上面的 HTTP 映射到服务端的 BIND。需要同时写 <code>--bench</code>，并且这个客户端要被允许自己改映射。</td></tr>
       <tr><td><code>--pool N</code></td><td>预连接数量。省略则用服务端通告的 <code>pool.idle</code>，并且不会超过 <code>max_idle</code>。</td></tr>
     </tbody>
   </table>
@@ -323,11 +322,12 @@ pool:
   <h2 id="web">管理页</h2>
   <p>页面编译进二进制，部署时不带额外文件。打开管理页后用顶部页签切换，不要在一个长页面里找功能。密钥只放在这个标签页的 <code>sessionStorage</code> 里，页面源码和接口响应都不会把当前密钥写出来。</p>
   <ul>
-    <li><strong>客户端</strong>：不用登录。三个系统的下载、每一步怎么填命令，以及 <code>-m</code> 左右两边分别是什么。命令里的密钥写成 <code>&lt;api-key&gt;</code>。</li>
+    <li><strong>客户端</strong>：不用登录。三个系统的下载，以及怎么用 <code>--secret &lt;secret&gt;</code> 连接。页面源码里没有真实 secret。</li>
+    <li><strong>账号</strong>：登录后新建客户端、复制 secret、允许或禁止它自己改映射、更换 secret、删除。更换 secret 或删除会让当前连接退出。</li>
     <li><strong>概览</strong>：在线客户端、映射、正在转发的连接、流量，以及控制通道、数据通道、管理页各自的地址。</li>
-    <li><strong>映射</strong>：选择在线客户端，监听 <code>0.0.0.0</code> 或 <code>127.0.0.1</code>，填写目标 <code>host:port</code>。正常是绿色，客户端不在线是黄色，最近一次错误是红色。</li>
+    <li><strong>映射</strong>：选择客户端（可以离线），监听 <code>0.0.0.0</code> 或 <code>127.0.0.1</code>，填写目标 <code>host:port</code>。表格里可以直接改监听和目标。正常是绿色，客户端不在线是黄色，最近一次错误是红色。</li>
     <li><strong>事件</strong>：上线、下线、绑定失败、目标没监听、目标不可达。同一句错误五秒内不重复。</li>
-    <li><strong>设置</strong>：登录后修改 api key。新密钥写回 yaml，立刻生效，已经连上的客户端不断开，重连时要用新密钥。其他管理页会退出。</li>
+    <li><strong>设置</strong>：登录后修改管理页的 api key。这把 key 不给客户端用。新密钥写回 yaml，立刻生效。其他管理页会退出。</li>
   </ul>
   <p><code>/</code>、<code>/healthz</code>、<code>/favicon.ico</code> 和 <code>/dl/punch-macos</code>、<code>/dl/punch-linux</code>、<code>/dl/punch-windows.exe</code> 不需要密钥。<code>/healthz</code> 返回 <code>ok</code>。</p>
   <div class="warnbox"><strong>证书。</strong>管理页用系统 OpenSSL 读 PEM，和 nginx 同一套：证书链文件加私钥文件。私钥可以是 <code>PRIVATE KEY</code>、<code>RSA PRIVATE KEY</code> 或 <code>EC PRIVATE KEY</code>。换证书时改 yaml 里的路径，两份文件都放好，然后重启服务端。</div>
@@ -339,9 +339,13 @@ pool:
     <tbody>
       <tr><td><span class="tag">GET</span></td><td><code>/api/ping</code></td><td><code>pong</code> 和当前 <code>io</code> 模式。用来确认接口和数据面。</td></tr>
       <tr><td><span class="tag">GET</span></td><td><code>/api/overview</code></td><td>客户端数、映射数、正在转发的连接数、<code>bytes_in</code> / <code>bytes_out</code>、三个监听地址、运行毫秒数。</td></tr>
-      <tr><td><span class="tag">GET</span></td><td><code>/api/clients</code></td><td>在线客户端：<code>id</code>、<code>name</code>、<code>addr</code>、<code>connected_ms</code>、空闲数据连接数 <code>pool_idle</code>。</td></tr>
-      <tr><td><span class="tag">GET</span></td><td><code>/api/mappings</code></td><td>每条映射的 bind、target、来源 <code>cli</code> 或 <code>api</code>、客户端是否在线、活跃连接、accept 次数、流量、<code>fail_count</code>、<code>last_error</code>。</td></tr>
+      <tr><td><span class="tag">GET</span></td><td><code>/api/clients</code></td><td>已配置的客户端：<code>name</code>、<code>secret</code>、<code>allow_maps</code>、<code>online</code>、<code>addr</code>、<code>connected_ms</code>、<code>pool_idle</code>。只在管理接口返回 secret。</td></tr>
+      <tr><td><span class="tag post">POST</span></td><td><code>/api/clients</code></td><td>正文 <code>{"name","secret","allow_maps"}</code>。<code>secret</code> 可省略，由服务端生成。名字或 secret 重复是 409。</td></tr>
+      <tr><td><span class="tag">PUT</span></td><td><code>/api/clients/:name</code></td><td>正文可带 <code>secret</code> 和 <code>allow_maps</code>。更换 secret 会通知在线客户端退出。只改权限时在线客户端马上收到新权限。</td></tr>
+      <tr><td><span class="tag del">DELETE</span></td><td><code>/api/clients/:name</code></td><td>删除客户端和它的映射，并通知在线客户端退出。</td></tr>
+      <tr><td><span class="tag">GET</span></td><td><code>/api/mappings</code></td><td>每条映射的 bind、target、客户端是否在线、活跃连接、accept 次数、流量、<code>fail_count</code>、<code>last_error</code>。</td></tr>
       <tr><td><span class="tag post">POST</span></td><td><code>/api/mappings</code></td><td>正文 <code>{"client_name","bind","target"}</code>。201 时带 <code>id</code>、<code>bind</code>、<code>target</code>，可能有 <code>warning</code>。</td></tr>
+      <tr><td><span class="tag">PUT</span></td><td><code>/api/mappings/:id</code></td><td>正文 <code>{"bind","target"}</code>。只改目标时不重新监听。改监听时先绑新端口，成功后再停掉旧的。</td></tr>
       <tr><td><span class="tag del">DELETE</span></td><td><code>/api/mappings/:id</code></td><td>关掉监听，并通知在线客户端删掉这条。不存在是 404。</td></tr>
       <tr><td><span class="tag">GET</span></td><td><code>/api/events</code></td><td>最近 200 条，新的在前。字段是 <code>ts_ms</code>、<code>kind</code>、<code>client_name</code>、<code>map_id</code>、<code>message</code>。</td></tr>
       <tr><td><span class="tag post">POST</span></td><td><code>/api/key</code></td><td>正文 <code>{"api_key":"..."}</code>。至少 8 个字符，不能含引号、反斜杠或控制字符。成功只返回 <code>{"ok":true}</code>，响应里没有密钥。写入配置文件并立即替换内存中的密钥。</td></tr>
@@ -350,13 +354,13 @@ pool:
   <p>事件 <code>kind</code> 有这些：<code>client_online</code>、<code>client_offline</code>、<code>bind_fail</code>、<code>listen_fail</code>、<code>target_error</code>。</p>
 
   <h2 id="fail">失败上报</h2>
-  <p>客户端在登记映射之后会先试拨目标，大约等 500 毫秒。连接被拒绝（对端没有 listen）时，消息以 <code>listen failed:</code> 开头，映射留在服务端，<code>last_error</code> 写成这句，事件类型是 <code>listen_fail</code>。其他拨号错误（域名失败、超时、网络不可达）记成 <code>target unreachable:</code>，事件类型是 <code>target_error</code>。</p>
-  <p>真正有访问进来、空闲连接或新数据连接上去拨目标时，同样的失败也会写回。同一条错误在 5 秒内不重复记事件，<code>fail_count</code> 每次都会加。内容变了会立刻再记一条。命令行映射被客户端重新登记时，<code>last_error</code> 会清掉。接口下发的映射如果客户端探测成功，也会清掉。</p>
+  <p>服务端把一条映射交给客户端时，客户端会先试拨目标，大约等 500 毫秒。连接被拒绝（对端没有 listen）时，消息以 <code>listen failed:</code> 开头，映射留在服务端，<code>last_error</code> 写成这句，事件类型是 <code>listen_fail</code>。其他拨号错误（域名失败、超时、网络不可达）记成 <code>target unreachable:</code>，事件类型是 <code>target_error</code>。</p>
+  <p>真正有访问进来、空闲连接或新数据连接上去拨目标时，同样的失败也会写回。同一条错误在 5 秒内不重复记事件，<code>fail_count</code> 每次都会加。内容变了会立刻再记一条。映射被修改或客户端探测成功时，<code>last_error</code> 会清掉。</p>
   <p>用接口创建时，探测失败不会把映射删掉。201 的 <code>warning</code> 就是客户端回的那句话，客户端不在线或 2 秒内没确认时，<code>warning</code> 是 <code>client offline</code> 或 <code>client ack timeout</code>。</p>
 
   <h2 id="bench">压测</h2>
   <p>客户端上的 <code>--bench</code> 是一个专门用来把隧道打满的明文 HTTP，不经过管理页的 TLS。</p>
-  <pre><code>punch client --server 10.0.0.1:8024 --key KEY \
+  <pre><code>punch client --server 10.0.0.1:8024 --secret &lt;secret&gt; \
   --bench 127.0.0.1:19090 --expose-bench 0.0.0.0:18080
 
 wrk -t4 -c256 -d30s http://10.0.0.1:18080/bench?size=1048576</code></pre>
@@ -370,13 +374,14 @@ wrk -t4 -c256 -d30s http://10.0.0.1:18080/bench?size=1048576</code></pre>
 
   <h2 id="deploy">部署</h2>
   <p>业务是一个文件：<code>punch server</code> 和 <code>punch client</code> 都在里面，管理页也在里面。HTTPS 在运行时链接系统的 OpenSSL，所以机器上要有 <code>libssl</code>（OpenSSL 3，装了 nginx 的系统通常已经有）。证书继续用 nginx 的那两份 PEM，不必换格式。</p>
-  <p>在 Linux 上编译出来的程序走 epoll 和 splice。在 macOS 上编译出来的程序功能相同，数据面是用户态拷贝。</p>
+  <p>在 Linux 上编译出来的程序走 epoll 和 splice。在 macOS 上编译出来的程序功能相同，数据面是用户态拷贝。Windows 包只包含客户端。</p>
+  <p><code>./deploy.sh</code> 会更新服务器上的程序，以及管理页提供的 <code>punch-macos</code>、<code>punch-linux</code>、<code>punch-windows.exe</code>。配置文件、证书和 <code>punch-clients.json</code> 留在服务器上，不会被这次同步盖掉。</p>
 
   <h2 id="extend">加一个管理接口</h2>
   <p>路由表在 <code>src/admin.rs</code> 的 <code>routes()</code>。加两处：</p>
   <ol>
     <li>写 <code>async fn my_api(app: Arc&lt;App&gt;, req: Request) -&gt; Response</code>。</li>
-    <li>在 <code>routes()</code> 里加一行，例如 <code>Route::get("/api/my-api", my_api)</code>。也有 <code>Route::post</code> 和 <code>Route::delete</code>。</li>
+    <li>在 <code>routes()</code> 里加一行，例如 <code>Route::get("/api/my-api", my_api)</code>。也有 <code>Route::post</code>、<code>Route::put</code> 和 <code>Route::delete</code>。</li>
   </ol>
   <p>路径写成 <code>/api/...</code> 就会自动检查 api key。路径里的 <code>:id</code> 用 <code>req.param("id")</code> 取，目前一段路径只支持一个这种参数。返回用 <code>Response::json</code> 或 <code>Response::err</code>。</p>
 </article>

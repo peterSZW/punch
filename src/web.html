@@ -84,6 +84,9 @@
   .stack { max-width: 460px; }
   .row { display: flex; gap: 8px; }
   .row > * { flex: 1; }
+  td input, td select { width: 100%; min-width: 8em; }
+  .check { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+  .check input { width: auto; }
   .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 14px 0; }
   .card, .cards a, .callout {
     border: 1px solid var(--line);
@@ -147,6 +150,7 @@
   </div>
   <nav class="tabs">
     <button type="button" data-tab="guide" class="on">客户端</button>
+    <button type="button" data-tab="accounts">账号</button>
     <button type="button" data-tab="overview">概览</button>
     <button type="button" data-tab="maps">映射</button>
     <button type="button" data-tab="events">事件</button>
@@ -156,7 +160,7 @@
 <main>
   <section data-pane="guide">
     <h1>下载并连上服务端</h1>
-    <p class="lead">客户端装在要被访问的那台机器上，由它主动连出。服务端只负责接受访问，再让客户端去拨目标地址。下面的命令已经填好这台服务端的控制地址，密钥位置留空。</p>
+    <p class="lead">客户端装在要被访问的那台机器上，由它主动连出。管理员先在「账号」里建好客户端，再把 secret 交给那台机器。这个页面不会写出 secret。</p>
     <div class="cards">
       <a href="/dl/punch-macos"><b>macOS</b><span>Apple 芯片。下载后执行 chmod +x。</span></a>
       <a href="/dl/punch-linux"><b>Linux x86_64</b><span>下载后执行 chmod +x。依赖系统的 libc 和 zlib。</span></a>
@@ -165,24 +169,59 @@
     <h2>连接之前</h2>
     <ol class="steps">
       <li>选和机器对应的文件。macOS 包不能在 Intel 芯片上跑，Windows 包不能用来启动服务端。</li>
-      <li>把命令里的 <code>&lt;api-key&gt;</code> 换成管理员给你的密钥。这个页面不会写出密钥。</li>
+      <li>把 <code>&lt;secret&gt;</code> 换成管理员给你的那一把。管理页的 api key 不能拿来连接。</li>
       <li><code>--server</code> 是控制通道，客户端只连这一个地址。数据通道在握手之后自动建立。</li>
-      <li><code>--name</code> 是这台客户端的名字。同一个名字再次连接会替换旧会话，管理页上的映射按这个名字交给它。</li>
-      <li><code>-m</code> 左边是服务端要监听的 <code>ip:port</code>，右边是客户端能访问的 <code>host:port</code>。可以写多条。</li>
+      <li>同一把 secret 只能有一台机器连着。另一台用它登录时，原来的那台会退出，并且不再重连。</li>
+      <li>连接时不要带 <code>-m</code>。映射在管理页里改。被允许的客户端连上之后，可以用 <code>punch map</code> 自己改。</li>
     </ol>
     <h2>命令</h2>
     <div class="cmd"><pre id="demo-mac" class="demo"></pre><button type="button" data-copy="demo-mac">复制</button></div>
     <div class="cmd"><pre id="demo-linux" class="demo"></pre><button type="button" data-copy="demo-linux">复制</button></div>
     <div class="cmd"><pre id="demo-win" class="demo"></pre><button type="button" data-copy="demo-win">复制</button></div>
-    <div class="callout"><strong>例子。</strong><code>0.0.0.0:18080=127.0.0.1:8080</code> 表示：别人访问这台服务端的 18080，流量转到客户端自己的 8080。<code>0.0.0.0</code> 对公网开放，<code>127.0.0.1</code> 只有服务端这台机器能连。目标可以是客户端能到达的任意地址，例如 <code>192.168.1.9:22</code>。目标当时没在监听，映射仍会保留，并在「事件」里记一条失败。</div>
+    <div class="callout"><strong>改映射。</strong>连上之后，如果管理员允许这台客户端自己改：<code id="map-demo"></code>。左边是服务端监听的地址，右边是客户端能访问的地址。管理页上的修改会马上生效。</div>
   </section>
 
   <section id="login" class="login hidden">
     <h1>登录</h1>
-    <p class="dim">输入配置文件里的 api key。它同时用于客户端和管理接口，页面不会显示当前密钥。</p>
+    <p class="dim">输入配置文件里的 api key。它只用于管理页，不能当作客户端的 secret。</p>
     <input id="key" type="password" placeholder="api key" autocomplete="current-password">
     <div style="margin-top:12px"><button id="enter" class="primary" type="button">进入</button></div>
     <div id="login-err" class="err"></div>
+  </section>
+
+  <section data-pane="accounts" class="hidden">
+    <h1>客户端账号</h1>
+    <p class="lead">每台要连进来的机器先在这里建一个账号。secret 只在登录后显示，方便复制。同一把 secret 同时只能有一台机器在线。</p>
+    <div class="split">
+      <div class="panel">
+        <h2>新建</h2>
+        <label>名字</label>
+        <input id="acc-name" placeholder="edge" autocomplete="off">
+        <label>secret</label>
+        <input id="acc-secret" placeholder="留空则自动生成" autocomplete="off">
+        <label class="check"><input id="acc-allow" type="checkbox"> 允许这台客户端自己添加和修改映射</label>
+        <div style="margin-top:14px"><button id="acc-create" class="primary" type="button">创建</button></div>
+        <div id="acc-err" class="err"></div>
+      </div>
+      <div class="panel">
+        <h2>怎么用</h2>
+        <ol class="steps">
+          <li>名字用来在映射里选择这台客户端。建好之后不能改名。</li>
+          <li>把 secret 填进客户端的 <code>--secret</code>。换 secret 会让当前连接退出。</li>
+          <li>关掉「自己改映射」之后，<code>punch map</code> 会失败。管理页仍然可以改。</li>
+        </ol>
+      </div>
+    </div>
+    <div class="panel" style="margin-top:12px">
+      <h2>已有客户端</h2>
+      <table>
+        <thead>
+          <tr><th>名字</th><th>secret</th><th>自己改映射</th><th>状态</th><th></th></tr>
+        </thead>
+        <tbody id="accounts"></tbody>
+      </table>
+      <div id="accounts-empty" class="empty hidden">还没有客户端。</div>
+    </div>
   </section>
 
   <section data-pane="overview" class="hidden">
@@ -208,7 +247,7 @@
 
   <section data-pane="maps" class="hidden">
     <h1>端口映射</h1>
-    <p class="lead">一条映射把服务端上的一个端口交给某个在线客户端。客户端命令行带上的映射标记为 cli，在这里创建的标记为 api。cli 映射会在同名客户端重连时按它当时的命令更新；api 映射会一直留着，直到在这里关闭。</p>
+    <p class="lead">一条映射把服务端上的一个端口交给某个客户端。客户端当时不在线也可以先建，它下次连上会自动用这里的最新配置。改监听或目标后马上生效。</p>
     <div class="split">
       <div class="panel">
         <h2>新建</h2>
@@ -230,7 +269,7 @@
       <div class="panel">
         <h2>怎么填</h2>
         <ol class="steps">
-          <li>先让客户端连上。下拉框里没有名字时，不能从这里新建。</li>
+          <li>先在「账号」里建客户端。下拉框里没有名字时，不能从这里新建。离线的也可以先建映射。</li>
           <li><code>0.0.0.0</code> 表示按服务端所在机器的网卡对外。只想给本机程序用时选 <code>127.0.0.1</code>。</li>
           <li>监听地址必须是 IP，不能写域名。目标可以写 IP 或客户端能解析的主机名。</li>
           <li>创建之后客户端会马上试连一次。连不上时这一行变红，映射不会被删掉。</li>
@@ -241,7 +280,7 @@
       <h2>现有映射</h2>
       <table>
         <thead>
-          <tr><th>id</th><th>客户端</th><th>监听</th><th>目标</th><th>连接</th><th>流量</th><th>状态</th><th></th></tr>
+          <tr><th>id</th><th>客户端</th><th>连接</th><th>流量</th><th>监听</th><th>目标</th><th>状态</th><th></th></tr>
         </thead>
         <tbody id="maps"></tbody>
       </table>
@@ -266,7 +305,7 @@
 
   <section data-pane="settings" class="hidden">
     <h1>设置</h1>
-    <p class="lead">api key 同时给客户端的 <code>--key</code> 和管理页使用。改完会写回服务器上的配置文件，并立刻生效，不需要重启。</p>
+    <p class="lead">api key 只给管理页使用。客户端登录用各自的 secret，改这里不会踢掉已经连上的客户端。</p>
     <div class="panel stack">
       <label>新的 api key</label>
       <input id="new-key" type="password" autocomplete="new-password" placeholder="至少 8 个字符">
@@ -276,7 +315,7 @@
       <div id="key-err" class="err"></div>
       <div id="key-ok" class="good"></div>
     </div>
-    <div class="callout"><strong>保存之后。</strong>已经连着的客户端不会被踢掉，下次重连必须用新密钥。其他打开着的管理页会在下一次刷新时退出。当前密钥不会显示在页面上，请自己保管新密钥。</div>
+    <div class="callout"><strong>保存之后。</strong>其他打开着的管理页会在下一次刷新时退出。已经连着的客户端继续用原来的 secret。当前密钥不会显示在页面上，请自己保管新密钥。</div>
   </section>
 </main>
 <script>
@@ -285,15 +324,16 @@ const store = "punch.apiKey";
 const tabStore = "punch.tab";
 const punchPort = __PUNCH_PORT__;
 const endpoint = location.hostname + ":" + punchPort;
-const locked = { overview: 1, maps: 1, events: 1, settings: 1 };
+const locked = { accounts: 1, overview: 1, maps: 1, events: 1, settings: 1 };
 
-function clientCmd(bin, name) {
-  return bin + " client --server " + endpoint + " --key <api-key> --name " + name + " -m 0.0.0.0:18080=127.0.0.1:8080";
+function clientCmd(bin) {
+  return bin + " client --server " + endpoint + " --secret <secret>";
 }
 
-$("demo-mac").textContent = "# macOS（Apple 芯片）\nchmod +x punch-macos\n" + clientCmd("./punch-macos", "mac");
-$("demo-linux").textContent = "# Linux x86_64\nchmod +x punch-linux\n" + clientCmd("./punch-linux", "linux");
-$("demo-win").textContent = "# Windows x86_64\n" + clientCmd("punch-windows.exe", "win");
+$("demo-mac").textContent = "# macOS（Apple 芯片）\nchmod +x punch-macos\n" + clientCmd("./punch-macos");
+$("demo-linux").textContent = "# Linux x86_64\nchmod +x punch-linux\n" + clientCmd("./punch-linux");
+$("demo-win").textContent = "# Windows x86_64\n" + clientCmd("punch-windows.exe");
+$("map-demo").textContent = "punch map add 0.0.0.0:18080=127.0.0.1:8080";
 
 function key() { return sessionStorage.getItem(store) || ""; }
 
@@ -409,16 +449,17 @@ async function refresh() {
   (cls.clients || []).forEach((c) => {
     const o = document.createElement("option");
     o.value = c.name;
-    o.textContent = c.name + "  " + c.addr;
+    o.textContent = c.name + (c.online ? "  在线" : "  离线");
     sel.appendChild(o);
   });
   if ([...sel.options].some((o) => o.value === cur)) sel.value = cur;
   if (!sel.options.length) {
     const o = document.createElement("option");
     o.value = "";
-    o.textContent = "没有在线客户端";
+    o.textContent = "还没有客户端";
     sel.appendChild(o);
   }
+  renderAccounts(cls.clients || []);
 
   const tb = $("maps");
   tb.replaceChildren();
@@ -430,14 +471,36 @@ async function refresh() {
     const clsName = m.last_error ? "bad" : (m.client_online ? "ok" : "warn");
     [
       String(m.id),
-      m.client_name + (m.origin === "api" ? " · api" : " · cli"),
-      m.bind,
-      m.target,
+      m.client_name,
       String(m.active) + " / " + String(m.accepts),
       bytes(m.bytes_in) + " → " + bytes(m.bytes_out),
     ].forEach((t) => tr.appendChild(el("td", t)));
+    const bindTd = document.createElement("td");
+    const bindIn = document.createElement("input");
+    bindIn.value = m.bind;
+    bindTd.appendChild(bindIn);
+    tr.appendChild(bindTd);
+    const targetTd = document.createElement("td");
+    const targetIn = document.createElement("input");
+    targetIn.value = m.target;
+    targetTd.appendChild(targetIn);
+    tr.appendChild(targetTd);
     tr.appendChild(el("td", status, clsName));
     const td = document.createElement("td");
+    const save = el("button", "保存");
+    save.type = "button";
+    save.onclick = async () => {
+      $("form-err").textContent = "";
+      try {
+        const out = await api("/api/mappings/" + m.id, {
+          method: "PUT",
+          body: { bind: bindIn.value.trim(), target: targetIn.value.trim() },
+        });
+        if (out.warning) $("form-err").textContent = out.warning;
+        await refresh();
+      } catch (e) { $("form-err").textContent = e.message; }
+    };
+    td.appendChild(save);
     const b = el("button", "关闭", "danger");
     b.type = "button";
     b.onclick = async () => {
@@ -486,7 +549,7 @@ $("logout").onclick = () => {
 $("create").onclick = async () => {
   $("form-err").textContent = "";
   const name = $("client").value;
-  if (!name) { $("form-err").textContent = "还没有在线客户端"; return; }
+  if (!name) { $("form-err").textContent = "先在「账号」里添加客户端"; return; }
   try {
     const out = await api("/api/mappings", {
       method: "POST",
@@ -520,6 +583,81 @@ $("save-key").onclick = async () => {
   } catch (e) {
     $("key-err").textContent = e.message;
   }
+};
+
+function renderAccounts(rows) {
+  const tb = $("accounts");
+  tb.replaceChildren();
+  $("accounts-empty").classList.toggle("hidden", rows.length > 0);
+  rows.forEach((c) => {
+    const tr = document.createElement("tr");
+    tr.appendChild(el("td", c.name));
+    const secretTd = document.createElement("td");
+    const secretIn = document.createElement("input");
+    secretIn.value = c.secret || "";
+    secretIn.spellcheck = false;
+    secretTd.appendChild(secretIn);
+    tr.appendChild(secretTd);
+    const allowTd = document.createElement("td");
+    const allow = el("button", c.allow_maps ? "允许" : "不允许");
+    allow.type = "button";
+    allow.onclick = async () => {
+      $("acc-err").textContent = "";
+      try {
+        await api("/api/clients/" + encodeURIComponent(c.name), {
+          method: "PUT",
+          body: { allow_maps: !c.allow_maps },
+        });
+        await refresh();
+      } catch (e) { $("acc-err").textContent = e.message; }
+    };
+    allowTd.appendChild(allow);
+    tr.appendChild(allowTd);
+    tr.appendChild(el("td", c.online ? "在线" : "离线", c.online ? "ok" : "warn"));
+    const td = document.createElement("td");
+    const save = el("button", "保存 secret");
+    save.type = "button";
+    save.onclick = async () => {
+      $("acc-err").textContent = "";
+      try {
+        await api("/api/clients/" + encodeURIComponent(c.name), {
+          method: "PUT",
+          body: { secret: secretIn.value.trim() },
+        });
+        await refresh();
+      } catch (e) { $("acc-err").textContent = e.message; }
+    };
+    const del = el("button", "删除", "danger");
+    del.type = "button";
+    del.onclick = async () => {
+      if (!confirm("删除客户端 " + c.name + " 和它的映射?")) return;
+      $("acc-err").textContent = "";
+      try {
+        await api("/api/clients/" + encodeURIComponent(c.name), { method: "DELETE" });
+        await refresh();
+      } catch (e) { $("acc-err").textContent = e.message; }
+    };
+    td.appendChild(save);
+    td.appendChild(del);
+    tr.appendChild(td);
+    tb.appendChild(tr);
+  });
+}
+
+$("acc-create").onclick = async () => {
+  $("acc-err").textContent = "";
+  const name = $("acc-name").value.trim();
+  if (!name) { $("acc-err").textContent = "需要名字"; return; }
+  const body = { name: name, allow_maps: $("acc-allow").checked };
+  const secret = $("acc-secret").value.trim();
+  if (secret) body.secret = secret;
+  try {
+    await api("/api/clients", { method: "POST", body: body });
+    $("acc-name").value = "";
+    $("acc-secret").value = "";
+    $("acc-allow").checked = false;
+    await refresh();
+  } catch (e) { $("acc-err").textContent = e.message; }
 };
 
 $("key").addEventListener("keydown", (e) => { if (e.key === "Enter") $("enter").click(); });

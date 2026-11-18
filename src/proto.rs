@@ -1,6 +1,6 @@
 //! 控制通道的小端二进制帧。数据面在握手之后不再走这个编码。
 
-pub const PROTO_VERSION: u8 = 1;
+pub const PROTO_VERSION: u8 = 2;
 pub const DATA_MAGIC: u32 = 0x504E_4348;
 pub const DATA_HELLO_LEN: usize = 34;
 
@@ -18,6 +18,13 @@ const LISTEN_FAIL: u8 = 11;
 const OPEN_STREAM: u8 = 12;
 const STREAM_FAIL: u8 = 13;
 const SYNC_DONE: u8 = 14;
+const SUPERSEDED: u8 = 15;
+const MAP_UPDATE: u8 = 16;
+const MAP_UPDATE_RESULT: u8 = 17;
+const MAP_DEL_REQ: u8 = 18;
+const MAP_DEL_RESULT: u8 = 19;
+const SNAPSHOT: u8 = 20;
+const ALLOW: u8 = 21;
 
 pub const DATA_IDLE: u8 = 0;
 pub const DATA_BOUND: u8 = 1;
@@ -26,8 +33,7 @@ pub const DATA_BOUND: u8 = 1;
 pub enum CtrlMsg {
     Hello {
         version: u8,
-        name: String,
-        api_key: String,
+        secret: String,
     },
     HelloOk {
         client_id: u64,
@@ -35,6 +41,12 @@ pub enum CtrlMsg {
         token: [u8; 16],
         pool_idle: u16,
         pool_max: u16,
+        name: String,
+        allow_maps: bool,
+    },
+    /// 这把 secret 已经有别的机器连上，或者管理员换了 secret。收到后不要重连。
+    Superseded {
+        message: String,
     },
     HelloErr {
         message: String,
@@ -74,6 +86,35 @@ pub enum CtrlMsg {
     MapDel {
         map_id: u32,
     },
+    MapUpdate {
+        req_id: u32,
+        map_id: u32,
+        bind_ip: String,
+        bind_port: u16,
+        target_host: String,
+        target_port: u16,
+    },
+    MapUpdateResult {
+        req_id: u32,
+        map_id: u32,
+        ok: bool,
+        message: String,
+    },
+    MapDelReq {
+        req_id: u32,
+        map_id: u32,
+    },
+    MapDelResult {
+        req_id: u32,
+        map_id: u32,
+        ok: bool,
+        message: String,
+    },
+    /// 服务端把这个客户端的映射全部推送完。
+    Snapshot,
+    Allow {
+        allow: bool,
+    },
     ListenFail {
         map_id: u32,
         message: String,
@@ -97,14 +138,9 @@ impl CtrlMsg {
         let mut body = Vec::with_capacity(64);
         body.push(self.tag());
         match self {
-            CtrlMsg::Hello {
-                version,
-                name,
-                api_key,
-            } => {
+            CtrlMsg::Hello { version, secret } => {
                 body.push(*version);
-                put_str(&mut body, name);
-                put_str(&mut body, api_key);
+                put_str(&mut body, secret);
             }
             CtrlMsg::HelloOk {
                 client_id,
@@ -112,14 +148,20 @@ impl CtrlMsg {
                 token,
                 pool_idle,
                 pool_max,
+                name,
+                allow_maps,
             } => {
                 body.extend_from_slice(&client_id.to_le_bytes());
                 body.extend_from_slice(&data_port.to_le_bytes());
                 body.extend_from_slice(token);
                 body.extend_from_slice(&pool_idle.to_le_bytes());
                 body.extend_from_slice(&pool_max.to_le_bytes());
+                put_str(&mut body, name);
+                body.push(u8::from(*allow_maps));
             }
-            CtrlMsg::HelloErr { message } => put_str(&mut body, message),
+            CtrlMsg::HelloErr { message } | CtrlMsg::Superseded { message } => {
+                put_str(&mut body, message);
+            }
             CtrlMsg::Ping { ts_ms } | CtrlMsg::Pong { ts_ms } => {
                 body.extend_from_slice(&ts_ms.to_le_bytes());
             }
@@ -170,6 +212,44 @@ impl CtrlMsg {
                 put_str(&mut body, message);
             }
             CtrlMsg::MapDel { map_id } => body.extend_from_slice(&map_id.to_le_bytes()),
+            CtrlMsg::MapUpdate {
+                req_id,
+                map_id,
+                bind_ip,
+                bind_port,
+                target_host,
+                target_port,
+            } => {
+                body.extend_from_slice(&req_id.to_le_bytes());
+                body.extend_from_slice(&map_id.to_le_bytes());
+                put_str(&mut body, bind_ip);
+                body.extend_from_slice(&bind_port.to_le_bytes());
+                put_str(&mut body, target_host);
+                body.extend_from_slice(&target_port.to_le_bytes());
+            }
+            CtrlMsg::MapUpdateResult {
+                req_id,
+                map_id,
+                ok,
+                message,
+            }
+            | CtrlMsg::MapDelResult {
+                req_id,
+                map_id,
+                ok,
+                message,
+            } => {
+                body.extend_from_slice(&req_id.to_le_bytes());
+                body.extend_from_slice(&map_id.to_le_bytes());
+                body.push(u8::from(*ok));
+                put_str(&mut body, message);
+            }
+            CtrlMsg::MapDelReq { req_id, map_id } => {
+                body.extend_from_slice(&req_id.to_le_bytes());
+                body.extend_from_slice(&map_id.to_le_bytes());
+            }
+            CtrlMsg::Snapshot => {}
+            CtrlMsg::Allow { allow } => body.push(u8::from(*allow)),
             CtrlMsg::ListenFail { map_id, message } => {
                 body.extend_from_slice(&map_id.to_le_bytes());
                 put_str(&mut body, message);
@@ -210,8 +290,7 @@ impl CtrlMsg {
         let msg = match body[0] {
             HELLO => CtrlMsg::Hello {
                 version: r.u8()?,
-                name: r.str()?,
-                api_key: r.str()?,
+                secret: r.str()?,
             },
             HELLO_OK => {
                 let client_id = r.u64()?;
@@ -219,15 +298,20 @@ impl CtrlMsg {
                 let token = r.arr()?;
                 let pool_idle = r.u16()?;
                 let pool_max = r.u16()?;
+                let name = r.str()?;
+                let allow_maps = r.u8()? == 1;
                 CtrlMsg::HelloOk {
                     client_id,
                     data_port,
                     token,
                     pool_idle,
                     pool_max,
+                    name,
+                    allow_maps,
                 }
             }
             HELLO_ERR => CtrlMsg::HelloErr { message: r.str()? },
+            SUPERSEDED => CtrlMsg::Superseded { message: r.str()? },
             PING => CtrlMsg::Ping { ts_ms: r.u64()? },
             PONG => CtrlMsg::Pong { ts_ms: r.u64()? },
             MAP_ADD => CtrlMsg::MapAdd {
@@ -256,6 +340,32 @@ impl CtrlMsg {
                 message: r.str()?,
             },
             MAP_DEL => CtrlMsg::MapDel { map_id: r.u32()? },
+            MAP_UPDATE => CtrlMsg::MapUpdate {
+                req_id: r.u32()?,
+                map_id: r.u32()?,
+                bind_ip: r.str()?,
+                bind_port: r.u16()?,
+                target_host: r.str()?,
+                target_port: r.u16()?,
+            },
+            MAP_UPDATE_RESULT => CtrlMsg::MapUpdateResult {
+                req_id: r.u32()?,
+                map_id: r.u32()?,
+                ok: r.u8()? == 1,
+                message: r.str()?,
+            },
+            MAP_DEL_REQ => CtrlMsg::MapDelReq {
+                req_id: r.u32()?,
+                map_id: r.u32()?,
+            },
+            MAP_DEL_RESULT => CtrlMsg::MapDelResult {
+                req_id: r.u32()?,
+                map_id: r.u32()?,
+                ok: r.u8()? == 1,
+                message: r.str()?,
+            },
+            SNAPSHOT => CtrlMsg::Snapshot,
+            ALLOW => CtrlMsg::Allow { allow: r.u8()? == 1 },
             LISTEN_FAIL => CtrlMsg::ListenFail {
                 map_id: r.u32()?,
                 message: r.str()?,
@@ -292,6 +402,13 @@ impl CtrlMsg {
             CtrlMsg::MapOpen { .. } => MAP_OPEN,
             CtrlMsg::MapOpenAck { .. } => MAP_OPEN_ACK,
             CtrlMsg::MapDel { .. } => MAP_DEL,
+            CtrlMsg::MapUpdate { .. } => MAP_UPDATE,
+            CtrlMsg::MapUpdateResult { .. } => MAP_UPDATE_RESULT,
+            CtrlMsg::MapDelReq { .. } => MAP_DEL_REQ,
+            CtrlMsg::MapDelResult { .. } => MAP_DEL_RESULT,
+            CtrlMsg::Snapshot => SNAPSHOT,
+            CtrlMsg::Allow { .. } => ALLOW,
+            CtrlMsg::Superseded { .. } => SUPERSEDED,
             CtrlMsg::ListenFail { .. } => LISTEN_FAIL,
             CtrlMsg::OpenStream { .. } => OPEN_STREAM,
             CtrlMsg::StreamFail { .. } => STREAM_FAIL,
@@ -450,9 +567,8 @@ mod tests {
         token[15] = 9;
         let samples = vec![
             CtrlMsg::Hello {
-                version: 1,
-                name: "edge".into(),
-                api_key: "secret".into(),
+                version: PROTO_VERSION,
+                secret: "secret-value".into(),
             },
             CtrlMsg::HelloOk {
                 client_id: 99,
@@ -460,6 +576,11 @@ mod tests {
                 token,
                 pool_idle: 16,
                 pool_max: 64,
+                name: "edge".into(),
+                allow_maps: true,
+            },
+            CtrlMsg::Superseded {
+                message: "replaced".into(),
             },
             CtrlMsg::HelloErr {
                 message: "bad key".into(),
@@ -507,6 +628,29 @@ mod tests {
                 map_id: 8,
                 message: "listen failed: connection refused".into(),
             },
+            CtrlMsg::MapUpdate {
+                req_id: 4,
+                map_id: 8,
+                bind_ip: "127.0.0.1".into(),
+                bind_port: 9,
+                target_host: "10.0.0.9".into(),
+                target_port: 81,
+            },
+            CtrlMsg::MapUpdateResult {
+                req_id: 4,
+                map_id: 8,
+                ok: true,
+                message: "updated".into(),
+            },
+            CtrlMsg::MapDelReq { req_id: 5, map_id: 8 },
+            CtrlMsg::MapDelResult {
+                req_id: 5,
+                map_id: 8,
+                ok: false,
+                message: "missing".into(),
+            },
+            CtrlMsg::Snapshot,
+            CtrlMsg::Allow { allow: false },
             CtrlMsg::SyncDone,
         ];
         for msg in samples {

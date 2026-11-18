@@ -11,13 +11,14 @@ use tokio::time::{timeout, MissedTickBehavior};
 
 use crate::{debug, error, info, warn};
 use crate::admin;
+use crate::catalog;
 use crate::cert;
 use crate::config::ServerConfig;
 use crate::ioframe::{read_data_hello, read_msg, write_msg};
 use crate::netutil::{self, tune_tokio};
 use crate::proto::{encode_assign, CtrlMsg, DATA_BOUND, DATA_IDLE};
 use crate::relay::relay;
-use crate::state::{App, Client, Event, MapAck, MapState, OpenReq, Origin};
+use crate::state::{App, Client, Event, MapAck, MapState, OpenReq};
 use crate::util::{self, lock, token_eq};
 
 pub struct BoundServer {
@@ -45,9 +46,13 @@ pub fn bind(cfg: ServerConfig) -> Result<BoundServer> {
     let data = data_l.local_addr()?;
     let web = web_l.local_addr()?;
     let tls = cert::load_server_config(std::path::Path::new(&cfg.web.cert), std::path::Path::new(&cfg.web.key))?;
+    let catalog_path = catalog::path_for(&cfg.config_path);
+    let (records, saved_maps) = catalog::load(&catalog_path)?;
     let app = Arc::new(App {
         api_key: Mutex::new(cfg.api_key),
         config_path: cfg.config_path,
+        catalog_path,
+        records: Mutex::new(records),
         tcp: cfg.tcp.clone(),
         pipe_size: cfg.tcp.pipe_size,
         max_idle: cfg.pool.max_idle as usize,
@@ -67,6 +72,7 @@ pub fn bind(cfg: ServerConfig) -> Result<BoundServer> {
         active: Default::default(),
         started_ms: util::now_ms(),
     });
+    restore_maps(&app, saved_maps)?;
     Ok(BoundServer {
         control,
         data,
@@ -204,11 +210,7 @@ async fn handle_data(app: Arc<App>, mut sock: TcpStream) {
 async fn handle_control(app: Arc<App>, sock: TcpStream, peer: SocketAddr) -> std::io::Result<()> {
     let (mut rd, mut wr) = sock.into_split();
     let hello = match timeout(Duration::from_secs(10), read_msg(&mut rd)).await {
-        Ok(Ok(CtrlMsg::Hello {
-            version,
-            name,
-            api_key,
-        })) => (version, name, api_key),
+        Ok(Ok(CtrlMsg::Hello { version, secret })) => (version, secret),
         Ok(Ok(_)) => {
             let _ = write_msg(
                 &mut wr,
@@ -221,7 +223,7 @@ async fn handle_control(app: Arc<App>, sock: TcpStream, peer: SocketAddr) -> std
         }
         _ => return Ok(()),
     };
-    let (version, name, api_key) = hello;
+    let (version, secret) = hello;
     if version != crate::proto::PROTO_VERSION {
         let _ = write_msg(
             &mut wr,
@@ -232,27 +234,18 @@ async fn handle_control(app: Arc<App>, sock: TcpStream, peer: SocketAddr) -> std
         .await;
         return Ok(());
     }
-    if name.is_empty() || name.len() > 64 {
+    let Some(record) = app.find_secret(&secret) else {
         let _ = write_msg(
             &mut wr,
             &CtrlMsg::HelloErr {
-                message: "client name must be 1..=64 bytes".into(),
+                message: "unknown secret".into(),
             },
         )
         .await;
+        warn!("rejected client, unknown secret peer={peer}");
         return Ok(());
-    }
-    if !util::keys_equal(&api_key, &app.api_key()) {
-        let _ = write_msg(
-            &mut wr,
-            &CtrlMsg::HelloErr {
-                message: "invalid api key".into(),
-            },
-        )
-        .await;
-        warn!("rejected client, bad api key name={name} peer={peer}");
-        return Ok(());
-    }
+    };
+    let name = record.name.clone();
 
     let (tx, mut rx) = mpsc::unbounded_channel();
     let (cancel_tx, cancel_rx) = watch::channel(false);
@@ -262,6 +255,7 @@ async fn handle_control(app: Arc<App>, sock: TcpStream, peer: SocketAddr) -> std
         addr: peer.to_string(),
         connected_ms: util::now_ms(),
         token: util::random_token(),
+        allow_maps: std::sync::atomic::AtomicBool::new(record.allow_maps),
         ctrl: tx,
         idle: Default::default(),
         pending_streams: Default::default(),
@@ -269,7 +263,6 @@ async fn handle_control(app: Arc<App>, sock: TcpStream, peer: SocketAddr) -> std
         cancel: cancel_tx,
     });
     app.insert_client(client.clone());
-    app.mark_cli_stale(&client.name);
     app.push_event(Event {
         ts_ms: util::now_ms(),
         kind: "client_online".into(),
@@ -291,7 +284,8 @@ async fn handle_control(app: Arc<App>, sock: TcpStream, peer: SocketAddr) -> std
                 msg = rx.recv() => {
                     match msg {
                         Some(msg) => {
-                            if write_msg(&mut wr, &msg).await.is_err() {
+                            let stop = matches!(msg, CtrlMsg::Superseded { .. });
+                            if write_msg(&mut wr, &msg).await.is_err() || stop {
                                 break;
                             }
                         }
@@ -308,12 +302,14 @@ async fn handle_control(app: Arc<App>, sock: TcpStream, peer: SocketAddr) -> std
         token: client.token,
         pool_idle: app.pool_idle,
         pool_max: app.pool_max,
+        name: client.name.clone(),
+        allow_maps: record.allow_maps,
     };
     if client.ctrl.send(hello_ok).is_err() {
         app.disconnect_client(client.id, &client.name);
         return Ok(());
     }
-    replay_api_maps(&app, &client);
+    replay_maps(&app, &client);
 
     let mut reader_stop = cancel_rx;
     let mut ticker = tokio::time::interval(Duration::from_secs(15));
@@ -357,21 +353,74 @@ async fn handle_control(app: Arc<App>, sock: TcpStream, peer: SocketAddr) -> std
     Ok(())
 }
 
-fn replay_api_maps(app: &App, client: &Client) {
+fn replay_maps(app: &App, client: &Client) {
     let maps: Vec<Arc<MapState>> = lock(&app.maps)
         .values()
-        .filter(|m| m.origin == Origin::Api && m.client_name == client.name)
+        .filter(|m| m.client_name == client.name)
         .cloned()
         .collect();
     for map in maps {
         let _ = client.ctrl.send(map_open_msg(&map));
     }
+    let _ = client.ctrl.send(CtrlMsg::Snapshot);
+}
+
+fn restore_maps(app: &Arc<App>, saved: Vec<catalog::SavedMap>) -> Result<()> {
+    for map in saved {
+        let id = map.id;
+        let req = OpenReq {
+            client_name: map.client_name,
+            bind_ip: map.bind_ip,
+            bind_port: map.bind_port,
+            target_host: map.target_host,
+            target_port: map.target_port,
+            fixed_id: Some(id),
+            persist: false,
+        };
+        if let Err(err) = app.open_map(req) {
+            warn!("restore map {id} failed: {err}");
+        }
+    }
+    Ok(())
+}
+
+fn self_map(client: &Client) -> Result<(), String> {
+    if client.allow_maps.load(std::sync::atomic::Ordering::Relaxed) {
+        Ok(())
+    } else {
+        Err("服务端没有允许这个客户端自己改映射".into())
+    }
+}
+
+fn owns_map(app: &App, client: &Client, id: u32) -> bool {
+    app.get_map(id)
+        .map(|m| m.client_name == client.name)
+        .unwrap_or(false)
+}
+
+fn apply_client_add(
+    app: &Arc<App>,
+    client: &Client,
+    bind_ip: String,
+    bind_port: u16,
+    target_host: String,
+    target_port: u16,
+) -> Result<Arc<MapState>, String> {
+    app.open_map(OpenReq {
+        client_name: client.name.clone(),
+        bind_ip,
+        bind_port,
+        target_host,
+        target_port,
+        fixed_id: None,
+        persist: true,
+    })
 }
 
 fn map_open_msg(map: &MapState) -> CtrlMsg {
     CtrlMsg::MapOpen {
         map_id: map.id,
-        bind_ip: map.bind_ip.clone(),
+        bind_ip: lock(&map.bind_ip).clone(),
         bind_port: map.bind_port.load(Ordering::Relaxed),
         target_host: lock(&map.target_host).clone(),
         target_port: map.target_port.load(Ordering::Relaxed),
@@ -391,21 +440,20 @@ fn dispatch_control(app: &Arc<App>, client: &Client, msg: CtrlMsg) -> bool {
             target_host,
             target_port,
         } => {
-            let req = OpenReq {
-                client_name: client.name.clone(),
-                bind_ip,
-                bind_port,
-                target_host,
-                target_port,
-                origin: Origin::Cli,
+            let result = match self_map(client) {
+                Ok(()) => apply_client_add(app, client, bind_ip, bind_port, target_host, target_port),
+                Err(err) => Err(err),
             };
-            let result = match app.open_map(req) {
-                Ok(map) => CtrlMsg::MapAddResult {
-                    req_id,
-                    map_id: map.id,
-                    ok: true,
-                    message: format!("listening on {}", map.bind_text()),
-                },
+            let msg = match result {
+                Ok(map) => {
+                    let _ = client.ctrl.send(map_open_msg(&map));
+                    CtrlMsg::MapAddResult {
+                        req_id,
+                        map_id: map.id,
+                        ok: true,
+                        message: format!("listening on {}", map.bind_text()),
+                    }
+                }
                 Err(err) => {
                     app.push_event(Event {
                         ts_ms: util::now_ms(),
@@ -422,13 +470,73 @@ fn dispatch_control(app: &Arc<App>, client: &Client, msg: CtrlMsg) -> bool {
                     }
                 }
             };
-            let _ = client.ctrl.send(result);
+            let _ = client.ctrl.send(msg);
         }
-        CtrlMsg::SyncDone => {
-            for id in app.stale_cli_ids(&client.name) {
-                let _ = app.close_map(id, false);
-            }
+        CtrlMsg::MapUpdate {
+            req_id,
+            map_id,
+            bind_ip,
+            bind_port,
+            target_host,
+            target_port,
+        } => {
+            let result = match self_map(client) {
+                Ok(()) => {
+                    if !owns_map(app, client, map_id) {
+                        Err("映射不存在".into())
+                    } else {
+                        app.update_map(map_id, bind_ip, bind_port, target_host, target_port)
+                    }
+                }
+                Err(err) => Err(err),
+            };
+            let msg = match result {
+                Ok(map) => {
+                    let _ = client.ctrl.send(map_open_msg(&map));
+                    CtrlMsg::MapUpdateResult {
+                        req_id,
+                        map_id: map.id,
+                        ok: true,
+                        message: format!("listening on {}", map.bind_text()),
+                    }
+                }
+                Err(err) => CtrlMsg::MapUpdateResult {
+                    req_id,
+                    map_id,
+                    ok: false,
+                    message: err,
+                },
+            };
+            let _ = client.ctrl.send(msg);
         }
+        CtrlMsg::MapDelReq { req_id, map_id } => {
+            let result = match self_map(client) {
+                Ok(()) => {
+                    if !owns_map(app, client, map_id) {
+                        Err("映射不存在".into())
+                    } else {
+                        app.close_map(map_id, true)
+                    }
+                }
+                Err(err) => Err(err),
+            };
+            let msg = match result {
+                Ok(()) => CtrlMsg::MapDelResult {
+                    req_id,
+                    map_id,
+                    ok: true,
+                    message: "deleted".into(),
+                },
+                Err(err) => CtrlMsg::MapDelResult {
+                    req_id,
+                    map_id,
+                    ok: false,
+                    message: err,
+                },
+            };
+            let _ = client.ctrl.send(msg);
+        }
+        CtrlMsg::SyncDone => {}
         CtrlMsg::MapOpenAck {
             map_id,
             status,
@@ -471,8 +579,8 @@ fn dispatch_control(app: &Arc<App>, client: &Client, msg: CtrlMsg) -> bool {
 
 impl App {
     pub fn open_map(self: &Arc<Self>, req: OpenReq) -> Result<Arc<MapState>, String> {
-        if req.client_name.is_empty() {
-            return Err("client_name 不能为空".into());
+        if self.find_record(&req.client_name).is_none() {
+            return Err("客户端不存在".into());
         }
         if req.target_host.is_empty() || req.target_port == 0 {
             return Err("target 无效".into());
@@ -484,17 +592,8 @@ impl App {
             .bind_ip
             .parse()
             .map_err(|_| format!("bind ip 无效: {}", req.bind_ip))?;
-        if let Some(existing) = self.find_cli_reuse(&req) {
-            *lock(&existing.target_host) = req.target_host;
-            existing.target_port.store(req.target_port, Ordering::Relaxed);
-            existing.stale.store(false, Ordering::Relaxed);
-            self.clear_map_error(&existing);
-            return Ok(existing);
-        }
-        if req.bind_port != 0 {
-            if self.find_listener(&req.bind_ip, req.bind_port).is_some() {
-                return Err(format!("{}:{} 已经被映射占用", req.bind_ip, req.bind_port));
-            }
+        if req.bind_port != 0 && self.find_listener(&req.bind_ip, req.bind_port).is_some() {
+            return Err(format!("{}:{} 已经被映射占用", req.bind_ip, req.bind_port));
         }
         let addr = SocketAddr::new(ip, req.bind_port);
         let listener = netutil::bind_tcp(addr, &self.tcp)
@@ -502,18 +601,24 @@ impl App {
         let actual = listener
             .local_addr()
             .map_err(|err| format!("读取监听地址失败: {err}"))?;
-        let id = self.next_map.fetch_add(1, Ordering::Relaxed);
+        let id = if let Some(id) = req.fixed_id {
+            let next = self.next_map.load(Ordering::Relaxed);
+            if id.saturating_add(1) > next {
+                self.next_map.store(id.saturating_add(1), Ordering::Relaxed);
+            }
+            id
+        } else {
+            self.next_map.fetch_add(1, Ordering::Relaxed)
+        };
         let (stop, stop_rx) = watch::channel(false);
         let map = Arc::new(MapState {
             id,
             client_name: req.client_name,
-            origin: req.origin,
-            bind_ip: req.bind_ip,
-            requested_port: req.bind_port,
+            bind_ip: std::sync::Mutex::new(req.bind_ip),
             bind_port: std::sync::atomic::AtomicU16::new(actual.port()),
             target_host: std::sync::Mutex::new(req.target_host),
             target_port: std::sync::atomic::AtomicU16::new(req.target_port),
-            stop,
+            stop: std::sync::Mutex::new(stop),
             active: Default::default(),
             bytes_in: Default::default(),
             bytes_out: Default::default(),
@@ -522,7 +627,6 @@ impl App {
             last_error: std::sync::Mutex::new(String::new()),
             last_error_ms: Default::default(),
             last_event_ms: Default::default(),
-            stale: Default::default(),
         });
         lock(&self.maps).insert(id, map.clone());
         let app = Arc::clone(self);
@@ -530,6 +634,11 @@ impl App {
         tokio::spawn(async move {
             accept_public(listener, accepted, app, stop_rx).await;
         });
+        if req.persist {
+            if let Err(err) = self.save_catalog() {
+                warn!("save catalog: {err}");
+            }
+        }
         info!(
             "map listening id={} client={} bind={} target={}",
             map.id,
@@ -540,17 +649,90 @@ impl App {
         Ok(map)
     }
 
+    pub fn update_map(
+        self: &Arc<Self>,
+        id: u32,
+        bind_ip: String,
+        bind_port: u16,
+        target_host: String,
+        target_port: u16,
+    ) -> Result<Arc<MapState>, String> {
+        if target_host.is_empty() || target_port == 0 {
+            return Err("target 无效".into());
+        }
+        if target_host.len() > 255 {
+            return Err("target 主机名过长".into());
+        }
+        let ip: IpAddr = bind_ip
+            .parse()
+            .map_err(|_| format!("bind ip 无效: {bind_ip}"))?;
+        let Some(map) = self.get_map(id) else {
+            return Err("mapping 不存在".into());
+        };
+        let same_bind = lock(&map.bind_ip).as_str() == bind_ip
+            && map.bind_port.load(Ordering::Relaxed) == bind_port
+            && bind_port != 0;
+        if same_bind {
+            *lock(&map.target_host) = target_host;
+            map.target_port.store(target_port, Ordering::Relaxed);
+            self.clear_map_error(&map);
+            if let Err(err) = self.save_catalog() {
+                warn!("save catalog: {err}");
+            }
+            return Ok(map);
+        }
+        if bind_port != 0 {
+            if let Some(existing) = self.find_listener(&bind_ip, bind_port) {
+                if existing.id != id {
+                    return Err(format!("{bind_ip}:{bind_port} 已经被映射占用"));
+                }
+            }
+        }
+        let addr = SocketAddr::new(ip, bind_port);
+        let listener = netutil::bind_tcp(addr, &self.tcp)
+            .map_err(|err| format!("listen {addr} 失败: {err}"))?;
+        let actual = listener
+            .local_addr()
+            .map_err(|err| format!("读取监听地址失败: {err}"))?;
+        *lock(&map.bind_ip) = bind_ip;
+        map.bind_port.store(actual.port(), Ordering::Relaxed);
+        *lock(&map.target_host) = target_host;
+        map.target_port.store(target_port, Ordering::Relaxed);
+        self.clear_map_error(&map);
+        let (stop, stop_rx) = watch::channel(false);
+        let old = std::mem::replace(&mut *lock(&map.stop), stop);
+        let _ = old.send(true);
+        let app = Arc::clone(self);
+        let accepted = map.clone();
+        tokio::spawn(async move {
+            accept_public(listener, accepted, app, stop_rx).await;
+        });
+        if let Err(err) = self.save_catalog() {
+            warn!("save catalog: {err}");
+        }
+        info!(
+            "map updated id={} bind={} target={}",
+            map.id,
+            map.bind_text(),
+            map.target_text()
+        );
+        Ok(map)
+    }
+
     pub fn close_map(&self, id: u32, notify: bool) -> Result<(), String> {
         let Some(map) = lock(&self.maps).remove(&id) else {
             return Err("mapping 不存在".into());
         };
-        let _ = map.stop.send(true);
+        let _ = lock(&map.stop).send(true);
         if notify {
             if let Some(client) = self.client_by_name(&map.client_name) {
                 let _ = client.ctrl.send(CtrlMsg::MapDel { map_id: id });
             }
         }
         info!("map closed id={id} bind={}", map.bind_text());
+        if let Err(err) = self.save_catalog() {
+            warn!("save catalog: {err}");
+        }
         Ok(())
     }
 

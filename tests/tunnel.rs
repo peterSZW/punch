@@ -6,13 +6,13 @@ use tokio::sync::watch;
 use tokio::time::timeout;
 
 use punch::cert;
-use punch::client::{Options, PortMap};
+use punch::client::Options;
 use punch::config::{PoolCfg, ServerConfig, TcpTune, WebCfg};
 use punch::server;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn tunnel_moves_bytes_and_reports_listen_failure() {
-    timeout(Duration::from_secs(40), body())
+    timeout(Duration::from_secs(50), body())
         .await
         .expect("test timed out")
         .unwrap();
@@ -64,7 +64,8 @@ async fn body() -> anyhow::Result<()> {
     assert!(index.body.contains("/dl/punch-macos"));
     assert!(index.body.contains("/dl/punch-linux"));
     assert!(index.body.contains("/dl/punch-windows.exe"));
-    assert!(index.body.contains("--key <api-key>"), "{index:?}");
+    assert!(index.body.contains("--secret <secret>"), "{index:?}");
+    assert!(!index.body.contains("-m "), "{index:?}");
     assert!(index.body.contains("设置"), "{index:?}");
     assert!(!index.body.contains("test-key-123456"), "{index:?}");
     let missing = https(web, &cert_path, "GET", "/dl/not-a-client", None, None).await?;
@@ -76,20 +77,52 @@ async fn body() -> anyhow::Result<()> {
     let denied = https(web, &cert_path, "GET", "/api/clients", None, None).await?;
     assert_eq!(denied.status, 401, "{denied:?}");
 
+    let secret = "edge-secret-0123456789";
+    let created_client = https(
+        web,
+        &cert_path,
+        "POST",
+        "/api/clients",
+        Some("test-key-123456"),
+        Some(&format!(
+            r#"{{"name":"edge","secret":"{secret}","allow_maps":false}}"#
+        )),
+    )
+    .await?;
+    assert_eq!(created_client.status, 201, "{created_client:?}");
+
     let client = Options {
         server: control,
-        api_key: "test-key-123456".into(),
-        name: "edge".into(),
-        maps: vec![PortMap {
-            bind_ip: "127.0.0.1".into(),
-            bind_port: 0,
-            target_host: echo.ip().to_string(),
-            target_port: echo.port(),
-        }],
+        secret: secret.into(),
+        expose: None,
         bench: None,
         pool: Some(2),
+        local_dir: Some(dir.clone()),
     };
     let client_task = tokio::spawn(punch::client::run(client, stop_tx.subscribe()));
+    let local = wait_addr(&dir).await?;
+    let denied = local_rpc(local, "ADD 127.0.0.1:0=127.0.0.1:9").await?;
+    assert!(
+        denied.contains("服务端没有允许这个客户端自己改映射"),
+        "{denied}"
+    );
+
+    let echo_map = https(
+        web,
+        &cert_path,
+        "POST",
+        "/api/mappings",
+        Some("test-key-123456"),
+        Some(&format!(
+            r#"{{"client_name":"edge","bind":"127.0.0.1:0","target":"{}:{}"}}"#,
+            echo.ip(),
+            echo.port()
+        )),
+    )
+    .await?;
+    assert_eq!(echo_map.status, 201, "{echo_map:?}");
+    let echo_id = json_u64(&echo_map.body, "id").expect("map id");
+    let echo_bind = json_str(&echo_map.body, "bind").expect("map bind");
 
     let public = wait_map(web, &cert_path).await?;
     let payload = patterned(512 * 1024);
@@ -172,6 +205,56 @@ async fn body() -> anyhow::Result<()> {
     .await?;
     assert!(events.body.contains("listen_fail"), "{events:?}");
 
+    let allowed = https(
+        web,
+        &cert_path,
+        "PUT",
+        "/api/clients/edge",
+        Some("test-key-123456"),
+        Some(r#"{"allow_maps":true}"#),
+    )
+    .await?;
+    assert_eq!(allowed.status, 200, "{allowed:?}");
+    let listed = wait_local(local, &public.port().to_string()).await?;
+    assert!(listed.contains(&echo_bind), "{listed}");
+
+    let marked = marked_echo().await;
+    let updated = https(
+        web,
+        &cert_path,
+        "PUT",
+        &format!("/api/mappings/{echo_id}"),
+        Some("test-key-123456"),
+        Some(&format!(
+            r#"{{"bind":"{echo_bind}","target":"{}:{}"}}"#,
+            marked.ip(),
+            marked.port()
+        )),
+    )
+    .await?;
+    assert_eq!(updated.status, 200, "{updated:?}");
+    copy_marked(public, &patterned(4096)).await?;
+
+    let other = dir.join("other");
+    std::fs::create_dir_all(&other)?;
+    let second = Options {
+        server: control,
+        secret: secret.into(),
+        expose: None,
+        bench: None,
+        pool: Some(2),
+        local_dir: Some(other.clone()),
+    };
+    let second_task = tokio::spawn(punch::client::run(second, stop_tx.subscribe()));
+    let joined = timeout(Duration::from_secs(8), client_task)
+        .await
+        .expect("first client did not stop")?;
+    let err = joined.expect_err("first client should stop");
+    let message = format!("{err:#}");
+    assert!(message.contains("另一台"), "{message}");
+    let _ = wait_addr(&other).await?;
+    copy_marked(public, &patterned(4096)).await?;
+
     let rotated = https(
         web,
         &cert_path,
@@ -203,7 +286,7 @@ async fn body() -> anyhow::Result<()> {
 
     let _ = stop_tx.send(true);
     let _ = timeout(Duration::from_secs(3), server_task).await;
-    let _ = timeout(Duration::from_secs(3), client_task).await;
+    let _ = timeout(Duration::from_secs(3), second_task).await;
     let _ = std::fs::remove_dir_all(&dir);
     Ok(())
 }
@@ -218,6 +301,24 @@ async fn echo_server() -> std::net::SocketAddr {
             };
             tokio::spawn(async move {
                 let (mut r, mut w) = sock.into_split();
+                let _ = tokio::io::copy(&mut r, &mut w).await;
+            });
+        }
+    });
+    addr
+}
+
+async fn marked_echo() -> std::net::SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let Ok((sock, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let (mut r, mut w) = sock.into_split();
+                let _ = w.write_all(b"Z").await;
                 let _ = tokio::io::copy(&mut r, &mut w).await;
             });
         }
@@ -270,6 +371,13 @@ async fn overview_bytes(
     Ok((inn, out))
 }
 
+fn json_str(body: &str, key: &str) -> Option<String> {
+    let pat = format!("\"{key}\":\"");
+    let rest = body.split(&pat).nth(1)?;
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
+
 fn json_u64(body: &str, key: &str) -> Option<u64> {
     let pat = format!("\"{key}\":");
     let rest = body.split(&pat).nth(1)?;
@@ -277,17 +385,81 @@ fn json_u64(body: &str, key: &str) -> Option<u64> {
     rest[..end].parse().ok()
 }
 
+async fn copy_marked(addr: std::net::SocketAddr, payload: &[u8]) -> anyhow::Result<()> {
+    let mut expect = Vec::with_capacity(payload.len() + 1);
+    expect.push(b'Z');
+    expect.extend_from_slice(payload);
+    copy_through_expect(addr, payload, &expect).await
+}
+
 async fn copy_through(addr: std::net::SocketAddr, payload: &[u8]) -> anyhow::Result<()> {
+    copy_through_expect(addr, payload, payload).await
+}
+
+async fn copy_through_expect(
+    addr: std::net::SocketAddr,
+    payload: &[u8],
+    expect: &[u8],
+) -> anyhow::Result<()> {
     let mut sock = timeout(Duration::from_secs(5), tokio::net::TcpStream::connect(addr))
         .await??;
     sock.write_all(payload).await?;
     sock.shutdown().await?;
     let mut got = Vec::new();
     sock.read_to_end(&mut got).await?;
-    if got != payload {
+    if got != expect {
         anyhow::bail!("payload mismatch: sent {} got {}", payload.len(), got.len());
     }
     Ok(())
+}
+
+async fn wait_addr(dir: &std::path::Path) -> anyhow::Result<std::net::SocketAddr> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(8);
+    loop {
+        if let Some(addr) = read_addr(dir) {
+            return Ok(addr);
+        }
+        if std::time::Instant::now() > deadline {
+            anyhow::bail!("client addr file did not appear in {}", dir.display());
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+fn read_addr(dir: &std::path::Path) -> Option<std::net::SocketAddr> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("punch.") && name.ends_with(".client.addr") {
+            let text = std::fs::read_to_string(entry.path()).ok()?;
+            return text.trim().parse().ok();
+        }
+    }
+    None
+}
+
+async fn local_rpc(addr: std::net::SocketAddr, line: &str) -> anyhow::Result<String> {
+    let mut sock = timeout(Duration::from_secs(3), tokio::net::TcpStream::connect(addr)).await??;
+    sock.write_all(line.as_bytes()).await?;
+    sock.shutdown().await?;
+    let mut text = String::new();
+    timeout(Duration::from_secs(3), sock.read_to_string(&mut text)).await??;
+    Ok(text)
+}
+
+async fn wait_local(addr: std::net::SocketAddr, needle: &str) -> anyhow::Result<String> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let last = local_rpc(addr, "LIST").await?;
+        if last.contains(needle) && !last.starts_with("error") {
+            return Ok(last);
+        }
+        if std::time::Instant::now() > deadline {
+            anyhow::bail!("local list did not contain {needle}: {last}");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 async fn wait_map(

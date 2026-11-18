@@ -22,7 +22,9 @@ use crate::cert::ServerCtx;
 use crate::minihttp::{HttpConn, Method, RawRequest};
 use crate::{debug, warn};
 use crate::relay::io_mode;
-use crate::state::{App, OpenReq, Origin};
+use crate::catalog::{self, ClientRecord};
+use crate::proto::CtrlMsg;
+use crate::state::{App, OpenReq};
 use crate::util::{self, lock};
 
 pub const INDEX_HTML: &str = include_str!("web.html");
@@ -315,6 +317,14 @@ impl Route {
         Self::make(Method::Post, path, f)
     }
 
+    fn put<F, Fut>(path: &'static str, f: F) -> Self
+    where
+        F: Fn(Arc<App>, Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        Self::make(Method::Put, path, f)
+    }
+
     fn delete<F, Fut>(path: &'static str, f: F) -> Self
     where
         F: Fn(Arc<App>, Request) -> Fut + Send + Sync + 'static,
@@ -360,8 +370,12 @@ fn routes() -> Vec<Route> {
         Route::get("/api/ping", ping),
         Route::get("/api/overview", overview),
         Route::get("/api/clients", clients),
+        Route::post("/api/clients", create_client),
+        Route::put("/api/clients/:name", update_client),
+        Route::delete("/api/clients/:name", delete_client),
         Route::get("/api/mappings", mappings),
         Route::post("/api/mappings", create_mapping),
+        Route::put("/api/mappings/:id", update_mapping),
         Route::delete("/api/mappings/:id", delete_mapping),
         Route::get("/api/events", events),
         Route::post("/api/key", set_api_key),
@@ -474,19 +488,185 @@ async fn overview(app: Arc<App>, _req: Request) -> Response {
 }
 
 async fn clients(app: Arc<App>, _req: Request) -> Response {
-    let list: Vec<_> = lock(&app.clients)
-        .values()
-        .map(|c| {
+    let records = lock(&app.records).clone();
+    let list: Vec<_> = records
+        .iter()
+        .map(|r| {
+            let online = app.client_by_name(&r.name);
             serde_json::json!({
-                "id": c.id,
-                "name": c.name,
-                "addr": c.addr,
-                "connected_ms": c.connected_ms,
-                "pool_idle": lock(&c.idle).len(),
+                "name": r.name,
+                "secret": r.secret,
+                "allow_maps": r.allow_maps,
+                "online": online.is_some(),
+                "addr": online.as_ref().map(|c| c.addr.clone()).unwrap_or_default(),
+                "connected_ms": online.as_ref().map(|c| c.connected_ms).unwrap_or(0),
+                "pool_idle": online.as_ref().map(|c| lock(&c.idle).len()).unwrap_or(0),
             })
         })
         .collect();
     Response::json(200, &serde_json::json!({ "clients": list }))
+}
+
+#[derive(Deserialize)]
+struct ClientBody {
+    name: String,
+    secret: Option<String>,
+    allow_maps: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct ClientPatch {
+    secret: Option<String>,
+    allow_maps: Option<bool>,
+}
+
+async fn create_client(app: Arc<App>, req: Request) -> Response {
+    let body: ClientBody = match req.json() {
+        Ok(body) => body,
+        Err(err) => return Response::err(400, err),
+    };
+    let name = body.name.trim();
+    if !catalog::valid_name(name) {
+        return Response::err(400, "名字只能是 1 到 64 位字母、数字、点、下划线或横线");
+    }
+    let secret = match body.secret {
+        Some(value) if !value.trim().is_empty() => value.trim().to_string(),
+        _ => catalog::new_secret(),
+    };
+    if let Err(err) = catalog::valid_secret(&secret) {
+        return Response::err(400, err.to_string());
+    }
+    if app.find_record(name).is_some() {
+        return Response::err(409, "已经有这个名字");
+    }
+    if app.find_secret(&secret).is_some() {
+        return Response::err(409, "这把 secret 已经给了别的客户端");
+    }
+    let record = ClientRecord {
+        name: name.to_string(),
+        secret,
+        allow_maps: body.allow_maps.unwrap_or(false),
+    };
+    lock(&app.records).push(record.clone());
+    if let Err(err) = app.save_catalog() {
+        lock(&app.records).retain(|r| r.name != record.name);
+        return Response::err(500, err);
+    }
+    Response::json(
+        201,
+        &serde_json::json!({
+            "name": record.name,
+            "secret": record.secret,
+            "allow_maps": record.allow_maps,
+        }),
+    )
+}
+
+async fn update_client(app: Arc<App>, req: Request) -> Response {
+    let name = match req.param("name") {
+        Some(name) => name.to_string(),
+        None => return Response::err(400, "缺少客户端名字"),
+    };
+    let body: ClientPatch = match req.json() {
+        Ok(body) => body,
+        Err(err) => return Response::err(400, err),
+    };
+    let Some(mut record) = app.find_record(&name) else {
+        return Response::err(404, "客户端不存在");
+    };
+    let mut secret_changed = false;
+    if let Some(secret) = body.secret {
+        let secret = secret.trim().to_string();
+        if let Err(err) = catalog::valid_secret(&secret) {
+            return Response::err(400, err.to_string());
+        }
+        if secret != record.secret {
+            if app
+                .find_secret(&secret)
+                .map(|r| r.name != record.name)
+                .unwrap_or(false)
+            {
+                return Response::err(409, "这把 secret 已经给了别的客户端");
+            }
+            record.secret = secret;
+            secret_changed = true;
+        }
+    }
+    if let Some(allow) = body.allow_maps {
+        record.allow_maps = allow;
+    }
+    {
+        let mut records = lock(&app.records);
+        let Some(slot) = records.iter_mut().find(|r| r.name == name) else {
+            return Response::err(404, "客户端不存在");
+        };
+        *slot = record.clone();
+    }
+    if let Err(err) = app.save_catalog() {
+        return Response::err(500, err);
+    }
+    if let Some(client) = app.client_by_name(&name) {
+        client
+            .allow_maps
+            .store(record.allow_maps, std::sync::atomic::Ordering::Relaxed);
+        if secret_changed {
+            if client
+                .ctrl
+                .send(CtrlMsg::Superseded {
+                    message: "管理员更换了 secret，请用新的 secret 重新登录".into(),
+                })
+                .is_err()
+            {
+                app.disconnect_client(client.id, &client.name);
+            }
+        } else {
+            let _ = client.ctrl.send(CtrlMsg::Allow {
+                allow: record.allow_maps,
+            });
+        }
+    }
+    Response::json(
+        200,
+        &serde_json::json!({
+            "name": record.name,
+            "secret": record.secret,
+            "allow_maps": record.allow_maps,
+        }),
+    )
+}
+
+async fn delete_client(app: Arc<App>, req: Request) -> Response {
+    let name = match req.param("name") {
+        Some(name) => name.to_string(),
+        None => return Response::err(400, "缺少客户端名字"),
+    };
+    if app.find_record(&name).is_none() {
+        return Response::err(404, "客户端不存在");
+    }
+    let ids: Vec<u32> = lock(&app.maps)
+        .values()
+        .filter(|m| m.client_name == name)
+        .map(|m| m.id)
+        .collect();
+    for id in ids {
+        let _ = app.close_map(id, true);
+    }
+    if let Some(client) = app.client_by_name(&name) {
+        if client
+            .ctrl
+            .send(CtrlMsg::Superseded {
+                message: "管理员删除了这个客户端".into(),
+            })
+            .is_err()
+        {
+            app.disconnect_client(client.id, &client.name);
+        }
+    }
+    lock(&app.records).retain(|r| r.name != name);
+    if let Err(err) = app.save_catalog() {
+        return Response::err(500, err);
+    }
+    Response::json(200, &serde_json::json!({ "deleted": name }))
 }
 
 async fn mappings(app: Arc<App>, _req: Request) -> Response {
@@ -499,7 +679,6 @@ async fn mappings(app: Arc<App>, _req: Request) -> Response {
                 "id": m.id,
                 "client_name": m.client_name,
                 "client_online": app.client_by_name(&m.client_name).is_some(),
-                "origin": match m.origin { Origin::Cli => "cli", Origin::Api => "api" },
                 "bind": m.bind_text(),
                 "target": m.target_text(),
                 "active": m.active.load(Ordering::Relaxed),
@@ -541,7 +720,8 @@ async fn create_mapping(app: Arc<App>, req: Request) -> Response {
         bind_port,
         target_host,
         target_port,
-        origin: Origin::Api,
+        fixed_id: None,
+        persist: true,
     }) {
         Ok(map) => map,
         Err(err) => {
@@ -562,6 +742,50 @@ async fn create_mapping(app: Arc<App>, req: Request) -> Response {
     };
     Response::json(
         201,
+        &serde_json::json!({
+            "id": opened.id,
+            "bind": opened.bind_text(),
+            "target": opened.target_text(),
+            "client_name": opened.client_name,
+            "warning": warning,
+        }),
+    )
+}
+
+#[derive(Deserialize)]
+struct UpdateBody {
+    bind: String,
+    target: String,
+}
+
+async fn update_mapping(app: Arc<App>, req: Request) -> Response {
+    let id = match req.param("id").and_then(|s| s.parse::<u32>().ok()) {
+        Some(id) => id,
+        None => return Response::err(400, "mapping id 无效"),
+    };
+    let body: UpdateBody = match req.json() {
+        Ok(body) => body,
+        Err(err) => return Response::err(400, err),
+    };
+    let (bind_ip, bind_port) = match util::parse_bind(body.bind.trim()) {
+        Ok(v) => v,
+        Err(err) => return Response::err(400, err),
+    };
+    let (target_host, target_port) = match util::parse_target(body.target.trim()) {
+        Ok(v) => v,
+        Err(err) => return Response::err(400, err),
+    };
+    let opened = match app.update_map(id, bind_ip, bind_port, target_host, target_port) {
+        Ok(map) => map,
+        Err(err) => return Response::err(400, err),
+    };
+    let warning = match app.push_map(&opened).await {
+        Ok(ack) if ack.status == 0 => None,
+        Ok(ack) => Some(ack.message),
+        Err(err) => Some(err),
+    };
+    Response::json(
+        200,
         &serde_json::json!({
             "id": opened.id,
             "bind": opened.bind_text(),

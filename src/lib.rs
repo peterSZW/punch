@@ -9,6 +9,7 @@ pub mod log;
 #[cfg(unix)]
 pub mod admin;
 pub mod bench;
+pub mod catalog;
 #[cfg(unix)]
 pub mod cert;
 pub mod client;

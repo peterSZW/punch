@@ -1,13 +1,14 @@
 use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
-use tokio::io::AsyncWriteExt;
-use tokio::net::TcpStream;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot, watch, Notify};
 use tokio::time::timeout;
 
@@ -31,12 +32,23 @@ pub struct PortMap {
 #[derive(Clone, Debug)]
 pub struct Options {
     pub server: SocketAddr,
-    pub api_key: String,
-    pub name: String,
-    pub maps: Vec<PortMap>,
+    pub secret: String,
+    pub expose: Option<PortMap>,
     pub bench: Option<SocketAddr>,
     pub pool: Option<u16>,
+    pub local_dir: Option<PathBuf>,
 }
+
+#[derive(Debug)]
+struct StopRetry(String);
+
+impl std::fmt::Display for StopRetry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for StopRetry {}
 
 pub async fn run(opts: Options, mut shutdown: watch::Receiver<bool>) -> Result<()> {
     if let Some(addr) = opts.bench {
@@ -52,6 +64,9 @@ pub async fn run(opts: Options, mut shutdown: watch::Receiver<bool>) -> Result<(
         match session(&opts, shutdown.clone()).await {
             Ok(()) => return Ok(()),
             Err(err) => {
+                if err.downcast_ref::<StopRetry>().is_some() {
+                    return Err(err);
+                }
                 warn!("control disconnected, retrying: {err:#}");
                 tokio::select! {
                     changed = shutdown.changed() => {
@@ -67,13 +82,24 @@ pub async fn run(opts: Options, mut shutdown: watch::Receiver<bool>) -> Result<(
     }
 }
 
+struct KnownMap {
+    bind: String,
+    target: String,
+}
+
 struct Session {
     ctrl: mpsc::UnboundedSender<CtrlMsg>,
     hello: Mutex<Option<oneshot::Sender<Result<(), String>>>>,
     map_wait: Mutex<HashMap<u32, oneshot::Sender<CtrlMsg>>>,
+    maps: Mutex<HashMap<u32, KnownMap>>,
     client_id: AtomicU64,
     token: Mutex<[u8; 16]>,
     data_addr: Mutex<Option<SocketAddr>>,
+    name: Mutex<String>,
+    allow_maps: AtomicBool,
+    ready: AtomicBool,
+    replaced: AtomicBool,
+    halt: Mutex<String>,
     pool_idle: AtomicU16,
     pool_max: AtomicU16,
     tune: TcpTune,
@@ -105,9 +131,15 @@ async fn session(opts: &Options, mut shutdown: watch::Receiver<bool>) -> Result<
         ctrl: tx,
         hello: Mutex::new(None),
         map_wait: Mutex::new(HashMap::new()),
+        maps: Mutex::new(HashMap::new()),
         client_id: AtomicU64::new(0),
         token: Mutex::new([0u8; 16]),
         data_addr: Mutex::new(None),
+        name: Mutex::new(String::new()),
+        allow_maps: AtomicBool::new(false),
+        ready: AtomicBool::new(false),
+        replaced: AtomicBool::new(false),
+        halt: Mutex::new(String::new()),
         pool_idle: AtomicU16::new(0),
         pool_max: AtomicU16::new(0),
         tune: TcpTune::default(),
@@ -152,8 +184,7 @@ async fn session(opts: &Options, mut shutdown: watch::Receiver<bool>) -> Result<
         .ctrl
         .send(CtrlMsg::Hello {
             version: PROTO_VERSION,
-            name: opts.name.clone(),
-            api_key: opts.api_key.clone(),
+            secret: opts.secret.clone(),
         })
         .map_err(|_| anyhow!("control writer closed"))?;
     timeout(Duration::from_secs(10), hello_rx)
@@ -171,21 +202,27 @@ async fn session(opts: &Options, mut shutdown: watch::Receiver<bool>) -> Result<
     if target == 0 {
         target = 1;
     }
+    let client_name = lock(&session.name).clone();
     info!(
-        "control connected client={} data={:?} pool={target}",
-        opts.name,
+        "control connected client={client_name} data={:?} pool={target}",
         lock(&session.data_addr)
     );
+    let local = serve_local(session.clone()).await?;
+    let addr_path = write_addr_file(opts, &client_name, local)?;
+    let _addr_file = AddrFile(addr_path);
+    println!("本地命令  {local}    punch map list");
     let pool_stop = cancel_rx;
     let pool_session = session.clone();
     tokio::spawn(async move {
         run_pool(pool_session, target as usize, pool_stop).await;
     });
 
-    for map in &opts.maps {
-        register_map(&session, map).await;
+    if let Some(map) = &opts.expose {
+        if let Err(err) = register_map(&session, map).await {
+            warn!("expose bench: {err}");
+            println!("expose bench 失败  {err}");
+        }
     }
-    let _ = session.ctrl.send(CtrlMsg::SyncDone);
 
     tokio::select! {
         changed = shutdown.changed() => {
@@ -194,6 +231,15 @@ async fn session(opts: &Options, mut shutdown: watch::Receiver<bool>) -> Result<
             }
         }
         res = reader => {
+            if session.replaced.load(Ordering::Relaxed) {
+                let message = lock(&session.halt).clone();
+                let message = if message.is_empty() {
+                    "这个 secret 已经不能继续用在这台机器上".into()
+                } else {
+                    message
+                };
+                return Err(StopRetry(message).into());
+            }
             if *shutdown.borrow() {
                 return Ok(());
             }
@@ -230,22 +276,26 @@ async fn read_loop(
             msg = read_msg(rd) => {
                 let msg = msg?;
                 last = std::time::Instant::now();
-                handle_server(session, msg);
+                if !handle_server(session, msg) {
+                    return Ok(());
+                }
             }
         }
     }
 }
 
-fn handle_server(session: &Arc<Session>, msg: CtrlMsg) {
+fn handle_server(session: &Arc<Session>, msg: CtrlMsg) -> bool {
     let forward = match &msg {
-        CtrlMsg::MapAddResult { req_id, .. } => Some(*req_id),
+        CtrlMsg::MapAddResult { req_id, .. }
+        | CtrlMsg::MapUpdateResult { req_id, .. }
+        | CtrlMsg::MapDelResult { req_id, .. } => Some(*req_id),
         _ => None,
     };
     if let Some(req_id) = forward {
         if let Some(tx) = lock(&session.map_wait).remove(&req_id) {
             let _ = tx.send(msg);
         }
-        return;
+        return true;
     }
     match msg {
         CtrlMsg::HelloOk {
@@ -254,10 +304,14 @@ fn handle_server(session: &Arc<Session>, msg: CtrlMsg) {
             token,
             pool_idle,
             pool_max,
+            name,
+            allow_maps,
         } => {
             session.client_id.store(client_id, Ordering::Relaxed);
             *lock(&session.token) = token;
             *lock(&session.data_addr) = Some(SocketAddr::new(session.server_ip, data_port));
+            *lock(&session.name) = name;
+            session.allow_maps.store(allow_maps, Ordering::Relaxed);
             session.pool_idle.store(pool_idle, Ordering::Relaxed);
             session.pool_max.store(pool_max, Ordering::Relaxed);
             if let Some(tx) = lock(&session.hello).take() {
@@ -269,16 +323,38 @@ fn handle_server(session: &Arc<Session>, msg: CtrlMsg) {
                 let _ = tx.send(Err(message));
             }
         }
+        CtrlMsg::Superseded { message } => {
+            *lock(&session.halt) = message;
+            session.replaced.store(true, Ordering::Relaxed);
+            return false;
+        }
         CtrlMsg::Ping { ts_ms } => {
             let _ = session.ctrl.send(CtrlMsg::Pong { ts_ms });
         }
-        CtrlMsg::Pong { .. } | CtrlMsg::SyncDone | CtrlMsg::MapDel { .. } => {}
+        CtrlMsg::Pong { .. } | CtrlMsg::SyncDone => {}
+        CtrlMsg::Allow { allow } => {
+            session.allow_maps.store(allow, Ordering::Relaxed);
+        }
+        CtrlMsg::Snapshot => {
+            session.ready.store(true, Ordering::Relaxed);
+        }
+        CtrlMsg::MapDel { map_id } => {
+            lock(&session.maps).remove(&map_id);
+        }
         CtrlMsg::MapOpen {
             map_id,
+            bind_ip,
+            bind_port,
             target_host,
             target_port,
-            ..
         } => {
+            lock(&session.maps).insert(
+                map_id,
+                KnownMap {
+                    bind: format!("{bind_ip}:{bind_port}"),
+                    target: format!("{target_host}:{target_port}"),
+                },
+            );
             let ctrl = session.ctrl.clone();
             tokio::spawn(async move {
                 let (status, message) = probe(&target_host, target_port).await;
@@ -312,9 +388,10 @@ fn handle_server(session: &Arc<Session>, msg: CtrlMsg) {
             debug!("ignore server message {other:?}");
         }
     }
+    true
 }
 
-async fn register_map(session: &Session, map: &PortMap) {
+async fn register_map(session: &Session, map: &PortMap) -> std::result::Result<String, String> {
     let req_id = session.next_req.fetch_add(1, Ordering::Relaxed);
     let (tx, rx) = oneshot::channel();
     lock(&session.map_wait).insert(req_id, tx);
@@ -329,18 +406,17 @@ async fn register_map(session: &Session, map: &PortMap) {
         })
         .is_err()
     {
-        return;
+        return Err("控制连接已断开".into());
     }
     let result = timeout(Duration::from_secs(5), rx).await;
     let msg = match result {
         Ok(Ok(msg)) => msg,
         _ => {
             lock(&session.map_wait).remove(&req_id);
-            error!(
+            return Err(format!(
                 "服务端没有确认这条映射 {}:{}",
                 map.bind_ip, map.bind_port
-            );
-            return;
+            ));
         }
     };
     if let CtrlMsg::MapAddResult {
@@ -367,17 +443,204 @@ async fn register_map(session: &Session, map: &PortMap) {
                     let _ = ctrl.send(CtrlMsg::ListenFail { map_id, message });
                 }
             });
-        } else {
-            error!(
-                "map 失败 {}:{} {message}",
-                map.bind_ip, map.bind_port
-            );
-            println!(
-                "map 失败  {}:{}  {message}",
-                map.bind_ip, map.bind_port
-            );
+            return Ok(format!("ok id={map_id} {message}"));
         }
+        error!(
+            "map 失败 {}:{} {message}",
+            map.bind_ip, map.bind_port
+        );
+        println!(
+            "map 失败  {}:{}  {message}",
+            map.bind_ip, map.bind_port
+        );
+        return Err(message);
     }
+    Err("服务端返回了意外的结果".into())
+}
+
+struct AddrFile(PathBuf);
+
+impl Drop for AddrFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn write_addr_file(opts: &Options, name: &str, local: SocketAddr) -> Result<PathBuf> {
+    let dir = match &opts.local_dir {
+        Some(dir) => dir.clone(),
+        None => std::env::current_dir().context("读取当前目录")?,
+    };
+    let path = dir.join(format!("punch.{name}.client.addr"));
+    std::fs::write(&path, format!("{local}\n")).with_context(|| format!("写入 {}", path.display()))?;
+    Ok(path)
+}
+
+async fn serve_local(session: Arc<Session>) -> Result<SocketAddr> {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .context("监听本地命令端口")?;
+    let addr = listener.local_addr().context("读取本地命令端口")?;
+    tokio::spawn(async move {
+        loop {
+            let Ok((sock, peer)) = listener.accept().await else {
+                break;
+            };
+            if !peer.ip().is_loopback() {
+                continue;
+            }
+            let session = session.clone();
+            tokio::spawn(async move {
+                let _ = local_conn(session, sock).await;
+            });
+        }
+    });
+    Ok(addr)
+}
+
+async fn local_conn(session: Arc<Session>, mut sock: TcpStream) -> io::Result<()> {
+    let mut buf = Vec::new();
+    let _ = timeout(Duration::from_secs(3), sock.read_to_end(&mut buf)).await;
+    if buf.len() > 2048 {
+        buf.truncate(2048);
+    }
+    let line = String::from_utf8_lossy(&buf).trim().to_string();
+    let reply = match local_command(&session, &line).await {
+        Ok(text) => text,
+        Err(err) => format!("error {err}"),
+    };
+    let mut out = reply;
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    sock.write_all(out.as_bytes()).await
+}
+
+async fn local_command(session: &Session, line: &str) -> std::result::Result<String, String> {
+    if !session.allow_maps.load(Ordering::Relaxed) {
+        return Err("服务端没有允许这个客户端自己改映射".into());
+    }
+    let mut parts = line.split_whitespace();
+    let cmd = parts.next().unwrap_or("");
+    match cmd {
+        "LIST" => {
+            if !session.ready.load(Ordering::Relaxed) {
+                return Err("映射还在同步".into());
+            }
+            let maps = lock(&session.maps);
+            if maps.is_empty() {
+                return Ok("ok".into());
+            }
+            let mut ids: Vec<u32> = maps.keys().copied().collect();
+            ids.sort_unstable();
+            let mut out = String::from("ok");
+            for id in ids {
+                if let Some(map) = maps.get(&id) {
+                    out.push('\n');
+                    out.push_str(&format!("{id} {} {}", map.bind, map.target));
+                }
+            }
+            Ok(out)
+        }
+        "ADD" => {
+            let bind = parts.next().ok_or_else(|| "用法: ADD bind target".to_string())?;
+            let target = parts.next().ok_or_else(|| "用法: ADD bind target".to_string())?;
+            let map = parse_port_map(bind, target)?;
+            register_map(session, &map).await
+        }
+        "UPDATE" => {
+            let id: u32 = parts
+                .next()
+                .ok_or_else(|| "用法: UPDATE id bind target".to_string())?
+                .parse()
+                .map_err(|_| "id 必须是数字".to_string())?;
+            let bind = parts.next().ok_or_else(|| "用法: UPDATE id bind target".to_string())?;
+            let target = parts.next().ok_or_else(|| "用法: UPDATE id bind target".to_string())?;
+            let map = parse_port_map(bind, target)?;
+            update_map(session, id, &map).await
+        }
+        "DEL" => {
+            let id: u32 = parts
+                .next()
+                .ok_or_else(|| "用法: DEL id".to_string())?
+                .parse()
+                .map_err(|_| "id 必须是数字".to_string())?;
+            delete_map(session, id).await
+        }
+        _ => Err("命令是 LIST、ADD、UPDATE、DEL".into()),
+    }
+}
+
+fn parse_port_map(bind: &str, target: &str) -> std::result::Result<PortMap, String> {
+    let (bind_ip, bind_port) = crate::util::parse_bind(bind)?;
+    let (target_host, target_port) = crate::util::parse_target(target)?;
+    Ok(PortMap {
+        bind_ip,
+        bind_port,
+        target_host,
+        target_port,
+    })
+}
+
+async fn update_map(session: &Session, id: u32, map: &PortMap) -> std::result::Result<String, String> {
+    let req_id = session.next_req.fetch_add(1, Ordering::Relaxed);
+    let (tx, rx) = oneshot::channel();
+    lock(&session.map_wait).insert(req_id, tx);
+    if session
+        .ctrl
+        .send(CtrlMsg::MapUpdate {
+            req_id,
+            map_id: id,
+            bind_ip: map.bind_ip.clone(),
+            bind_port: map.bind_port,
+            target_host: map.target_host.clone(),
+            target_port: map.target_port,
+        })
+        .is_err()
+    {
+        return Err("控制连接已断开".into());
+    }
+    let msg = match timeout(Duration::from_secs(5), rx).await {
+        Ok(Ok(msg)) => msg,
+        _ => {
+            lock(&session.map_wait).remove(&req_id);
+            return Err("服务端没有确认修改".into());
+        }
+    };
+    if let CtrlMsg::MapUpdateResult { ok, message, map_id, .. } = msg {
+        if ok {
+            return Ok(format!("ok id={map_id} {message}"));
+        }
+        return Err(message);
+    }
+    Err("服务端返回了意外的结果".into())
+}
+
+async fn delete_map(session: &Session, id: u32) -> std::result::Result<String, String> {
+    let req_id = session.next_req.fetch_add(1, Ordering::Relaxed);
+    let (tx, rx) = oneshot::channel();
+    lock(&session.map_wait).insert(req_id, tx);
+    if session
+        .ctrl
+        .send(CtrlMsg::MapDelReq { req_id, map_id: id })
+        .is_err()
+    {
+        return Err("控制连接已断开".into());
+    }
+    let msg = match timeout(Duration::from_secs(5), rx).await {
+        Ok(Ok(msg)) => msg,
+        _ => {
+            lock(&session.map_wait).remove(&req_id);
+            return Err("服务端没有确认删除".into());
+        }
+    };
+    if let CtrlMsg::MapDelResult { ok, message, .. } = msg {
+        if ok {
+            return Ok(format!("ok id={id}"));
+        }
+        return Err(message);
+    }
+    Err("服务端返回了意外的结果".into())
 }
 
 async fn probe(host: &str, port: u16) -> (u8, String) {

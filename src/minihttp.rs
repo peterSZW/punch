@@ -7,6 +7,7 @@ pub enum Method {
     Get,
     Post,
     Delete,
+    Put,
     Options,
     Other,
 }
@@ -17,6 +18,7 @@ impl Method {
             "GET" => Method::Get,
             "POST" => Method::Post,
             "DELETE" => Method::Delete,
+            "PUT" => Method::Put,
             "OPTIONS" => Method::Options,
             _ => Method::Other,
         }
@@ -27,6 +29,7 @@ impl Method {
             Method::Get => "GET",
             Method::Post => "POST",
             Method::Delete => "DELETE",
+            Method::Put => "PUT",
             Method::Options => "OPTIONS",
             Method::Other => "OTHER",
         }

@@ -56,10 +56,18 @@ pool:
   idle: 32
   max_idle: 64
 EOF
+cat > "$WORKDIR/punch-clients.json" << EOF
+{
+  "clients": [
+    {"name": "perf", "secret": "$KEY", "allow_maps": true}
+  ],
+  "maps": []
+}
+EOF
 
 "$BIN" server -c "$WORKDIR/punch-server.yaml" > "$WORKDIR/server.log" 2>&1 &
 SERVER_PID=$!
-"$BIN" client --server "$CTRL" --key "$KEY" --name perf \
+"$BIN" client --server "$CTRL" --secret "$KEY" \
     --bench "$BENCH" --expose-bench "127.0.0.1:$PUBLIC" --pool 32 \
     > "$WORKDIR/client.log" 2>&1 &
 CLIENT_PID=$!

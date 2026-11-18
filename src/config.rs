@@ -262,7 +262,7 @@ fn render_yaml(cfg: &ServerConfig) -> String {
 control_listen: "{control}"
 data_listen: "{data}"
 
-# 客户端和 HTTPS 管理接口共用
+# 只给管理页使用。客户端用各自的 secret 登录，不使用这把 key
 api_key: "{key}"
 
 web:
