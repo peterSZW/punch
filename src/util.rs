@@ -110,17 +110,27 @@ pub fn parse_target(input: &str) -> Result<(String, u16), String> {
 }
 
 pub fn hostname() -> String {
-    let mut buf = [0u8; 256];
-    let rc = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
-    if rc != 0 {
-        return "client".to_string();
+    #[cfg(unix)]
+    {
+        let mut buf = [0u8; 256];
+        let rc = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
+        if rc != 0 {
+            return "client".to_string();
+        }
+        let end = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
+        let name = String::from_utf8_lossy(&buf[..end]).trim().to_string();
+        if name.is_empty() {
+            return "client".to_string();
+        }
+        return name;
     }
-    let end = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
-    let name = String::from_utf8_lossy(&buf[..end]).trim().to_string();
-    if name.is_empty() {
-        "client".to_string()
-    } else {
-        name
+    #[cfg(not(unix))]
+    {
+        std::env::var("COMPUTERNAME")
+            .ok()
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "client".to_string())
     }
 }
 

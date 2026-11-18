@@ -8,6 +8,7 @@
 //! 路径里的 `:id` 用 `req.param("id")` 读取。
 
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -161,6 +162,7 @@ pub struct Response {
     status: u16,
     reason: &'static str,
     content_type: &'static str,
+    extra: &'static str,
     body: Vec<u8>,
 }
 
@@ -171,6 +173,7 @@ impl Response {
             status,
             reason: reason(status),
             content_type: "application/json; charset=utf-8",
+            extra: "",
             body,
         }
     }
@@ -180,11 +183,34 @@ impl Response {
     }
 
     pub fn html(body: &'static str) -> Self {
+        Self::html_bytes(body.as_bytes().to_vec())
+    }
+
+    pub fn html_bytes(body: Vec<u8>) -> Self {
         Self {
             status: 200,
             reason: "OK",
             content_type: "text/html; charset=utf-8",
-            body: body.as_bytes().to_vec(),
+            extra: "",
+            body,
+        }
+    }
+
+    pub fn download(filename: &'static str, body: Vec<u8>) -> Self {
+        let extra = match filename {
+            "punch-macos" => "Content-Disposition: attachment; filename=\"punch-macos\"\r\n",
+            "punch-linux" => "Content-Disposition: attachment; filename=\"punch-linux\"\r\n",
+            "punch-windows.exe" => {
+                "Content-Disposition: attachment; filename=\"punch-windows.exe\"\r\n"
+            }
+            _ => "",
+        };
+        Self {
+            status: 200,
+            reason: "OK",
+            content_type: "application/octet-stream",
+            extra,
+            body,
         }
     }
 
@@ -193,6 +219,7 @@ impl Response {
             status,
             reason: reason(status),
             content_type: "text/plain",
+            extra: "",
             body: Vec::new(),
         }
     }
@@ -200,10 +227,11 @@ impl Response {
     fn to_bytes(&self, keep: bool) -> Vec<u8> {
         let conn = if keep { "keep-alive" } else { "close" };
         let head = format!(
-            "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: {}\r\nCache-Control: no-store\r\n\r\n",
+            "HTTP/1.1 {} {}\r\nContent-Type: {}\r\n{}Content-Length: {}\r\nConnection: {}\r\nCache-Control: no-store\r\n\r\n",
             self.status,
             self.reason,
             self.content_type,
+            self.extra,
             self.body.len(),
             conn
         );
@@ -308,6 +336,25 @@ impl Route {
     }
 }
 
+fn index_page(app: &App) -> Response {
+    let html = INDEX_HTML.replace("__PUNCH_PORT__", &app.control_addr.port().to_string());
+    Response::html_bytes(html.into_bytes())
+}
+
+fn dist_download(name: &str) -> Response {
+    let filename = match name {
+        "punch-macos" => "punch-macos",
+        "punch-linux" => "punch-linux",
+        "punch-windows.exe" => "punch-windows.exe",
+        _ => return Response::err(404, "not found"),
+    };
+    let path = PathBuf::from("dist").join(filename);
+    match std::fs::read(&path) {
+        Ok(body) => Response::download(filename, body),
+        Err(_) => Response::err(404, "客户端二进制还没有放到 dist/"),
+    }
+}
+
 fn routes() -> Vec<Route> {
     vec![
         Route::get("/api/ping", ping),
@@ -317,6 +364,7 @@ fn routes() -> Vec<Route> {
         Route::post("/api/mappings", create_mapping),
         Route::delete("/api/mappings/:id", delete_mapping),
         Route::get("/api/events", events),
+        Route::post("/api/key", set_api_key),
     ]
 }
 
@@ -329,11 +377,15 @@ pub async fn dispatch(app: Arc<App>, mut req: Request) -> Response {
             status: 200,
             reason: "OK",
             content_type: "text/plain; charset=utf-8",
+            extra: "",
             body: b"ok\n".to_vec(),
         };
     }
     if req.path == "/" {
-        return Response::html(INDEX_HTML);
+        return index_page(&app);
+    }
+    if let Some(name) = req.path.strip_prefix("/dl/") {
+        return dist_download(name);
     }
     if req.path.starts_with("/api/") && !authorized(&app, &req) {
         return Response::err(401, "invalid api key");
@@ -365,7 +417,36 @@ fn authorized(app: &App, req: &Request) -> bool {
     } else {
         return false;
     };
-    util::keys_equal(&presented, &app.api_key)
+    util::keys_equal(&presented, &app.api_key())
+}
+
+#[derive(Deserialize)]
+struct KeyBody {
+    api_key: String,
+}
+
+async fn set_api_key(app: Arc<App>, req: Request) -> Response {
+    let body: KeyBody = match req.json() {
+        Ok(body) => body,
+        Err(err) => return Response::err(400, err),
+    };
+    let key = body.api_key.trim();
+    if key.len() < 8 {
+        return Response::err(400, "api key 至少 8 个字符");
+    }
+    if key.len() > 128 || key.chars().any(|c| c.is_control() || c == '"' || c == '\\') {
+        return Response::err(400, "api key 不能包含引号、反斜杠或控制字符");
+    }
+    if app.config_path.as_os_str().is_empty() {
+        return Response::err(500, "没有配置文件，不能保存");
+    }
+    let key = key.to_string();
+    let mut current = lock(&app.api_key);
+    if let Err(err) = crate::config::write_api_key(&app.config_path, &key) {
+        return Response::err(500, err.to_string());
+    }
+    *current = key;
+    Response::json(200, &serde_json::json!({ "ok": true }))
 }
 
 async fn ping(_app: Arc<App>, _req: Request) -> Response {

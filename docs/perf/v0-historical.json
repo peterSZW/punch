@@ -1,0 +1,49 @@
+{
+  "tag": "historical",
+  "kept": true,
+  "workload": "loopback GET 262144 bytes, 24 connections, one public port",
+  "note": "Single sample taken before the tagged series. Userspace stacks stop at the syscall because the release binary has no frame pointers. The live service was not sampled.",
+  "elapsed_s": 14.003,
+  "bytes": 28768206848,
+  "reqs": 109742,
+  "errors": 0,
+  "mib_s": 1959.33,
+  "gbps": 15.307,
+  "rps": 7837.3,
+  "p50_us": 2800,
+  "p99_us": 15200,
+  "max_us": 34173,
+  "sample_hz": 99,
+  "sample_s": 10,
+  "samples": 1300,
+  "server_samples": 324,
+  "client_samples": 976,
+  "server_cores": 0.33,
+  "client_cores": 0.99,
+  "inclusive_pct": {
+    "server": {
+      "kernel": 91.4,
+      "splice": 66.7,
+      "punch_splice": 59.3,
+      "tcp_send": 56.2,
+      "tcp_rx": 27.5,
+      "spin_lock": 11.7,
+      "netfilter": 7.4,
+      "epoll": 4.0,
+      "tokio_park": 1.5
+    },
+    "client": {
+      "kernel": 96.9,
+      "tcp_send": 83.3,
+      "tcp_rx": 48.8,
+      "splice": 32.4,
+      "punch_splice": 20.1,
+      "tcp_copy": 15.5,
+      "netfilter": 13.5,
+      "spin_lock": 3.9,
+      "punch_other": 1.8,
+      "epoll": 0.7,
+      "tokio_park": 0.3
+    }
+  }
+}

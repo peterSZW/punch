@@ -5,12 +5,14 @@ fn main() {
     println!("cargo:rerun-if-env-changed=OPENSSL_DIR");
     println!("cargo:rerun-if-env-changed=OPENSSL_LIB_DIR");
     println!("cargo:rerun-if-env-changed=PKG_CONFIG_PATH");
+    println!("cargo:rerun-if-env-changed=PUNCH_OPENSSL_STATIC");
+    let static_link = std::env::var("PUNCH_OPENSSL_STATIC").ok().as_deref() == Some("1");
     if let Some(dir) = env_lib_dir() {
-        emit(&dir);
+        emit(&dir, static_link);
         return;
     }
     if let Some(dir) = pkg_config_lib_dir() {
-        emit(&dir);
+        emit(&dir, static_link);
         return;
     }
     for dir in [
@@ -23,7 +25,7 @@ fn main() {
         "/usr/lib",
     ] {
         if lib_exists(dir) {
-            emit(dir);
+            emit(dir, static_link);
             return;
         }
     }
@@ -78,8 +80,28 @@ fn lib_exists(dir: &str) -> bool {
     .any(|name| base.join(name).exists())
 }
 
-fn emit(dir: &str) {
+fn emit(dir: &str, static_link: bool) {
     println!("cargo:rustc-link-search=native={dir}");
+    if static_link {
+        println!("cargo:rustc-link-lib=static=ssl");
+        println!("cargo:rustc-link-lib=static=crypto");
+        let target = std::env::var("TARGET").unwrap_or_default();
+        if target.contains("linux") {
+            println!("cargo:rustc-link-lib=z");
+            println!("cargo:rustc-link-lib=dl");
+            println!("cargo:rustc-link-lib=pthread");
+        } else if target.contains("windows") {
+            println!("cargo:rustc-link-lib=dylib=ws2_32");
+            println!("cargo:rustc-link-lib=dylib=gdi32");
+            println!("cargo:rustc-link-lib=dylib=crypt32");
+            println!("cargo:rustc-link-lib=dylib=bcrypt");
+            println!("cargo:rustc-link-lib=dylib=user32");
+            println!("cargo:rustc-link-lib=dylib=advapi32");
+        } else if target.contains("apple") {
+            println!("cargo:rustc-link-lib=z");
+        }
+        return;
+    }
     println!("cargo:rustc-link-lib=ssl");
     println!("cargo:rustc-link-lib=crypto");
     println!("cargo:rustc-link-arg-bins=-Wl,-rpath,{dir}");

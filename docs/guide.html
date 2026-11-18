@@ -321,12 +321,15 @@ pool:
   <p>控制连接断开后，客户端会从 1 秒开始重试，最长间隔 15 秒。日志用环境变量 <code>RUST_LOG=debug</code> 打到标准错误，可选 <code>error</code>、<code>warn</code>、<code>info</code>、<code>debug</code>。</p>
 
   <h2 id="web">管理页</h2>
-  <p>页面编译进二进制，部署时不带额外文件。打开 <code>https://&lt;主机&gt;:8443/</code>，输入 api key。密钥只放在这个标签页的 <code>sessionStorage</code> 里。页面每 2 秒拉一次总览、客户端、映射和事件。</p>
+  <p>页面编译进二进制，部署时不带额外文件。打开管理页后用顶部页签切换，不要在一个长页面里找功能。密钥只放在这个标签页的 <code>sessionStorage</code> 里，页面源码和接口响应都不会把当前密钥写出来。</p>
   <ul>
-    <li>映射表里，目标正常是绿色，客户端不在线是黄色，最近一次错误是红色。</li>
-    <li>开映射时，监听 IP 选 <code>0.0.0.0</code> 或 <code>127.0.0.1</code>，再填端口和 <code>host:port</code> 目标。</li>
-    <li><code>/</code>、<code>/healthz</code>、<code>/favicon.ico</code> 不需要密钥。<code>/healthz</code> 返回 <code>ok</code>。</li>
+    <li><strong>客户端</strong>：不用登录。三个系统的下载、每一步怎么填命令，以及 <code>-m</code> 左右两边分别是什么。命令里的密钥写成 <code>&lt;api-key&gt;</code>。</li>
+    <li><strong>概览</strong>：在线客户端、映射、正在转发的连接、流量，以及控制通道、数据通道、管理页各自的地址。</li>
+    <li><strong>映射</strong>：选择在线客户端，监听 <code>0.0.0.0</code> 或 <code>127.0.0.1</code>，填写目标 <code>host:port</code>。正常是绿色，客户端不在线是黄色，最近一次错误是红色。</li>
+    <li><strong>事件</strong>：上线、下线、绑定失败、目标没监听、目标不可达。同一句错误五秒内不重复。</li>
+    <li><strong>设置</strong>：登录后修改 api key。新密钥写回 yaml，立刻生效，已经连上的客户端不断开，重连时要用新密钥。其他管理页会退出。</li>
   </ul>
+  <p><code>/</code>、<code>/healthz</code>、<code>/favicon.ico</code> 和 <code>/dl/punch-macos</code>、<code>/dl/punch-linux</code>、<code>/dl/punch-windows.exe</code> 不需要密钥。<code>/healthz</code> 返回 <code>ok</code>。</p>
   <div class="warnbox"><strong>证书。</strong>管理页用系统 OpenSSL 读 PEM，和 nginx 同一套：证书链文件加私钥文件。私钥可以是 <code>PRIVATE KEY</code>、<code>RSA PRIVATE KEY</code> 或 <code>EC PRIVATE KEY</code>。换证书时改 yaml 里的路径，两份文件都放好，然后重启服务端。</div>
 
   <h2 id="api">HTTP 接口</h2>
@@ -341,6 +344,7 @@ pool:
       <tr><td><span class="tag post">POST</span></td><td><code>/api/mappings</code></td><td>正文 <code>{"client_name","bind","target"}</code>。201 时带 <code>id</code>、<code>bind</code>、<code>target</code>，可能有 <code>warning</code>。</td></tr>
       <tr><td><span class="tag del">DELETE</span></td><td><code>/api/mappings/:id</code></td><td>关掉监听，并通知在线客户端删掉这条。不存在是 404。</td></tr>
       <tr><td><span class="tag">GET</span></td><td><code>/api/events</code></td><td>最近 200 条，新的在前。字段是 <code>ts_ms</code>、<code>kind</code>、<code>client_name</code>、<code>map_id</code>、<code>message</code>。</td></tr>
+      <tr><td><span class="tag post">POST</span></td><td><code>/api/key</code></td><td>正文 <code>{"api_key":"..."}</code>。至少 8 个字符，不能含引号、反斜杠或控制字符。成功只返回 <code>{"ok":true}</code>，响应里没有密钥。写入配置文件并立即替换内存中的密钥。</td></tr>
     </tbody>
   </table>
   <p>事件 <code>kind</code> 有这些：<code>client_online</code>、<code>client_offline</code>、<code>bind_fail</code>、<code>listen_fail</code>、<code>target_error</code>。</p>

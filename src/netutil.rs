@@ -8,6 +8,7 @@ use tokio::net::{TcpListener, TcpStream};
 use crate::config::TcpTune;
 
 pub fn raise_nofile() {
+    #[cfg(unix)]
     unsafe {
         let mut lim = libc::rlimit {
             rlim_cur: 0,

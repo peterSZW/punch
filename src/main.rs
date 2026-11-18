@@ -1,4 +1,5 @@
 use std::net::ToSocketAddrs;
+#[cfg(unix)]
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -6,9 +7,12 @@ use anyhow::{anyhow, bail, Context, Result};
 use tokio::sync::watch;
 
 use punch::client::{Options, PortMap};
+#[cfg(unix)]
 use punch::config;
 use punch::netutil;
+#[cfg(unix)]
 use punch::relay::io_mode;
+#[cfg(unix)]
 use punch::server;
 use punch::util::{self, hostname};
 
@@ -62,6 +66,12 @@ fn runtime() -> Result<tokio::runtime::Runtime> {
         .context("创建 tokio runtime")
 }
 
+#[cfg(not(unix))]
+async fn cmd_server(_args: Vec<String>) -> Result<()> {
+    bail!("这个 Windows 程序只包含客户端");
+}
+
+#[cfg(unix)]
 async fn cmd_server(args: Vec<String>) -> Result<()> {
     netutil::raise_nofile();
     let mut config_path = PathBuf::from("punch-server.yaml");

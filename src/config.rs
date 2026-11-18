@@ -6,6 +6,7 @@ use std::collections::HashMap;
 
 use anyhow::{bail, Context, Result};
 
+#[cfg(unix)]
 use crate::cert;
 use crate::util::random_hex;
 
@@ -14,6 +15,7 @@ pub struct ServerConfig {
     pub control_listen: String,
     pub data_listen: String,
     pub api_key: String,
+    pub config_path: PathBuf,
     pub web: WebCfg,
     pub tcp: TcpTune,
     pub pool: PoolCfg,
@@ -89,6 +91,7 @@ impl ServerConfig {
             control_listen: req(&map, "control_listen")?,
             data_listen: req(&map, "data_listen")?,
             api_key: req(&map, "api_key")?,
+            config_path: PathBuf::new(),
             web: WebCfg {
                 listen: req(&map, "web.listen")?,
                 cert: req(&map, "web.cert")?,
@@ -149,6 +152,7 @@ pub fn load_or_create(path: &Path) -> Result<(ServerConfig, bool)> {
         let text = fs::read_to_string(path)
             .with_context(|| format!("读取配置 {}", path.display()))?;
         let mut cfg = ServerConfig::parse_yaml(&text)?;
+        remember_path(&mut cfg, path);
         resolve_paths(&mut cfg, path)?;
         ensure_cert_files(&cfg)?;
         return Ok((cfg, false));
@@ -163,9 +167,75 @@ pub fn load_or_create(path: &Path) -> Result<(ServerConfig, bool)> {
     let text = render_yaml(&cfg);
     fs::write(path, &text).with_context(|| format!("写入 {}", path.display()))?;
     let mut loaded = ServerConfig::parse_yaml(&text)?;
+    remember_path(&mut loaded, path);
     resolve_paths(&mut loaded, path)?;
     ensure_cert_files(&loaded)?;
     Ok((loaded, true))
+}
+
+fn remember_path(cfg: &mut ServerConfig, path: &Path) {
+    cfg.config_path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    };
+}
+
+/// 只改配置文件里的 `api_key` 这一行，其余内容保持原样。
+pub fn write_api_key(path: &Path, key: &str) -> Result<()> {
+    if key.len() < 8 || key != key.trim() {
+        bail!("api key 至少 8 个字符");
+    }
+    if key.len() > 128 || key.chars().any(|c| c.is_control() || c == '"' || c == '\\') {
+        bail!("api key 不能包含引号、反斜杠或控制字符");
+    }
+    let text = fs::read_to_string(path).with_context(|| format!("读取配置 {}", path.display()))?;
+    let mut found = false;
+    let mut out = String::new();
+    for line in text.split_inclusive('\n') {
+        if !found && is_api_key_line(line) {
+            let ending = if line.ends_with("\r\n") {
+                "\r\n"
+            } else if line.ends_with('\n') {
+                "\n"
+            } else {
+                ""
+            };
+            out.push_str("api_key: \"");
+            out.push_str(key);
+            out.push('"');
+            out.push_str(ending);
+            found = true;
+        } else {
+            out.push_str(line);
+        }
+    }
+    if !found {
+        bail!("配置文件里没有 api_key");
+    }
+    let name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("punch-server.yaml");
+    let tmp = path.with_file_name(format!(".{name}.tmp"));
+    fs::write(&tmp, &out).with_context(|| format!("写入 {}", tmp.display()))?;
+    #[cfg(unix)]
+    if let Ok(meta) = fs::metadata(path) {
+        let _ = fs::set_permissions(&tmp, meta.permissions());
+    }
+    fs::rename(&tmp, path).with_context(|| format!("替换 {}", path.display()))?;
+    Ok(())
+}
+
+fn is_api_key_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with('#') {
+        return false;
+    }
+    let trimmed = trimmed.trim_end_matches(['\n', '\r']);
+    trimmed.starts_with("api_key:")
 }
 
 fn default_config() -> ServerConfig {
@@ -173,6 +243,7 @@ fn default_config() -> ServerConfig {
         control_listen: "0.0.0.0:8024".into(),
         data_listen: "0.0.0.0:8025".into(),
         api_key: random_hex(24),
+        config_path: PathBuf::new(),
         web: WebCfg {
             listen: "0.0.0.0:8443".into(),
             cert: "certs/cert.pem".into(),
@@ -375,7 +446,16 @@ fn ensure_cert_files(cfg: &ServerConfig) -> Result<()> {
             fs::create_dir_all(parent)?;
         }
     }
-    cert::write_self_signed(cert, key).context("生成本地自签名证书")?;
+    #[cfg(unix)]
+    {
+        cert::write_self_signed(cert, key).context("生成本地自签名证书")?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (cert, key);
+        bail!("这个 Windows 程序只包含客户端");
+    }
+    #[cfg(unix)]
     Ok(())
 }
 
@@ -394,5 +474,25 @@ mod tests {
         assert_eq!(parsed.web.listen, "0.0.0.0:8443");
         assert_eq!(parsed.tcp.pipe_size, 256 * 1024);
         assert_eq!(parsed.pool.idle, 16);
+    }
+
+    #[test]
+    fn replacing_api_key_keeps_the_other_lines() {
+        let dir = std::env::temp_dir().join(format!("punch-key-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("punch-server.yaml");
+        fs::write(
+            &path,
+            "control_listen: \"127.0.0.1:6100\"\napi_key: \"old-key-1234\"\nweb:\n  listen: \"127.0.0.1:6102\"\n",
+        )
+        .unwrap();
+        write_api_key(&path, "new-key-5678").unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("api_key: \"new-key-5678\""));
+        assert!(text.contains("control_listen: \"127.0.0.1:6100\""));
+        assert!(text.contains("listen: \"127.0.0.1:6102\""));
+        assert!(write_api_key(&path, "short").is_err());
+        let _ = fs::remove_dir_all(&dir);
     }
 }

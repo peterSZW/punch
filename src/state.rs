@@ -1,5 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -94,7 +95,8 @@ pub struct OpenReq {
 }
 
 pub struct App {
-    pub api_key: String,
+    pub api_key: Mutex<String>,
+    pub config_path: PathBuf,
     pub tcp: TcpTune,
     pub pipe_size: usize,
     pub max_idle: usize,
@@ -116,6 +118,10 @@ pub struct App {
 }
 
 impl App {
+    pub fn api_key(&self) -> String {
+        lock(&self.api_key).clone()
+    }
+
     pub fn client_by_name(&self, name: &str) -> Option<Arc<Client>> {
         let id = *lock(&self.by_name).get(name)?;
         lock(&self.clients).get(&id).cloned()

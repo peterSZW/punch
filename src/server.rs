@@ -1,6 +1,6 @@
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -46,7 +46,8 @@ pub fn bind(cfg: ServerConfig) -> Result<BoundServer> {
     let web = web_l.local_addr()?;
     let tls = cert::load_server_config(std::path::Path::new(&cfg.web.cert), std::path::Path::new(&cfg.web.key))?;
     let app = Arc::new(App {
-        api_key: cfg.api_key,
+        api_key: Mutex::new(cfg.api_key),
+        config_path: cfg.config_path,
         tcp: cfg.tcp.clone(),
         pipe_size: cfg.tcp.pipe_size,
         max_idle: cfg.pool.max_idle as usize,
@@ -241,7 +242,7 @@ async fn handle_control(app: Arc<App>, sock: TcpStream, peer: SocketAddr) -> std
         .await;
         return Ok(());
     }
-    if !util::keys_equal(&api_key, &app.api_key) {
+    if !util::keys_equal(&api_key, &app.api_key()) {
         let _ = write_msg(
             &mut wr,
             &CtrlMsg::HelloErr {
@@ -652,16 +653,13 @@ async fn drive_public(app: Arc<App>, map: Arc<MapState>, public: TcpStream) {
             }
         }
     };
-    match relay(public, tunnel, app.pipe_size).await {
-        Ok((to_target, from_target)) => {
-            map.bytes_in.fetch_add(to_target, Ordering::Relaxed);
-            map.bytes_out.fetch_add(from_target, Ordering::Relaxed);
-            app.bytes_in.fetch_add(to_target, Ordering::Relaxed);
-            app.bytes_out.fetch_add(from_target, Ordering::Relaxed);
-        }
-        Err(err) => {
-            debug!("relay ended map={}: {err}", map.id);
-        }
+    let end = relay(public, tunnel, app.pipe_size).await;
+    map.bytes_in.fetch_add(end.a_to_b, Ordering::Relaxed);
+    map.bytes_out.fetch_add(end.b_to_a, Ordering::Relaxed);
+    app.bytes_in.fetch_add(end.a_to_b, Ordering::Relaxed);
+    app.bytes_out.fetch_add(end.b_to_a, Ordering::Relaxed);
+    if let Some(err) = end.err {
+        debug!("relay ended map={}: {err}", map.id);
     }
 }
 

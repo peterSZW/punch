@@ -4,13 +4,12 @@
 //! 上接受连接，再让客户端去拨它能访问的任意地址。
 //! Linux 上运行时用 epoll（tokio/mio）接连接，数据面用 splice 零拷贝。
 
-#[cfg(not(unix))]
-compile_error!("punch supports unix only (Linux splice, other unix uses userspace copy)");
-
 #[macro_use]
 pub mod log;
+#[cfg(unix)]
 pub mod admin;
 pub mod bench;
+#[cfg(unix)]
 pub mod cert;
 pub mod client;
 pub mod config;
@@ -19,10 +18,12 @@ pub mod minihttp;
 pub mod netutil;
 pub mod proto;
 pub mod relay;
+#[cfg(unix)]
 pub mod server;
 pub mod state;
 pub mod util;
 
 pub use client::Options as ClientOptions;
 pub use config::ServerConfig;
+#[cfg(unix)]
 pub use server::BoundServer;

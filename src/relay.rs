@@ -8,18 +8,29 @@
 use std::io;
 use tokio::net::TcpStream;
 
+/// 一次转发的结果。对端中途断开时，已经写到另一侧的字节仍然留在计数里。
+pub struct RelayEnd {
+    pub a_to_b: u64,
+    pub b_to_a: u64,
+    pub err: Option<io::Error>,
+}
+
 pub fn io_mode() -> &'static str {
     #[cfg(target_os = "linux")]
     {
         "epoll+splice"
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(all(unix, not(target_os = "linux")))]
     {
         "kqueue+copy"
     }
+    #[cfg(not(unix))]
+    {
+        "copy"
+    }
 }
 
-pub async fn relay(a: TcpStream, b: TcpStream, buf_or_pipe: usize) -> io::Result<(u64, u64)> {
+pub async fn relay(a: TcpStream, b: TcpStream, buf_or_pipe: usize) -> RelayEnd {
     #[cfg(target_os = "linux")]
     {
         linux::splice_or_copy(a, b, buf_or_pipe).await
@@ -30,14 +41,80 @@ pub async fn relay(a: TcpStream, b: TcpStream, buf_or_pipe: usize) -> io::Result
     }
 }
 
-pub async fn copy_pair(mut a: TcpStream, mut b: TcpStream, buf: usize) -> io::Result<(u64, u64)> {
-    let n = buf.clamp(64 * 1024, 1024 * 1024);
-    tokio::io::copy_bidirectional_with_sizes(&mut a, &mut b, n, n).await
+pub async fn copy_pair(a: TcpStream, b: TcpStream, buf: usize) -> RelayEnd {
+    copy::pair(a, b, buf).await
+}
+
+mod copy {
+    use super::RelayEnd;
+    use std::io::{self, ErrorKind};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    pub async fn pair(a: TcpStream, b: TcpStream, buf: usize) -> RelayEnd {
+        let n = buf.clamp(64 * 1024, 1024 * 1024);
+        let (mut ar, mut aw) = a.into_split();
+        let (mut br, mut bw) = b.into_split();
+        let ab = AtomicU64::new(0);
+        let ba = AtomicU64::new(0);
+        let left = async {
+            let mut buf = vec![0u8; n];
+            loop {
+                let got = ar.read(&mut buf).await?;
+                if got == 0 {
+                    let _ = bw.shutdown().await;
+                    break;
+                }
+                let mut bytes = &buf[..got];
+                while !bytes.is_empty() {
+                    let wrote = bw.write(bytes).await?;
+                    if wrote == 0 {
+                        return Err(io::Error::new(ErrorKind::WriteZero, "write returned 0"));
+                    }
+                    bytes = &bytes[wrote..];
+                    ab.fetch_add(wrote as u64, Ordering::Relaxed);
+                }
+            }
+            Ok::<(), io::Error>(())
+        };
+        let right = async {
+            let mut buf = vec![0u8; n];
+            loop {
+                let got = br.read(&mut buf).await?;
+                if got == 0 {
+                    let _ = aw.shutdown().await;
+                    break;
+                }
+                let mut bytes = &buf[..got];
+                while !bytes.is_empty() {
+                    let wrote = aw.write(bytes).await?;
+                    if wrote == 0 {
+                        return Err(io::Error::new(ErrorKind::WriteZero, "write returned 0"));
+                    }
+                    bytes = &bytes[wrote..];
+                    ba.fetch_add(wrote as u64, Ordering::Relaxed);
+                }
+            }
+            Ok::<(), io::Error>(())
+        };
+        let (left, right) = tokio::join!(left, right);
+        let err = match (left, right) {
+            (Ok(()), Ok(())) => None,
+            (Err(err), _) | (_, Err(err)) => Some(err),
+        };
+        RelayEnd {
+            a_to_b: ab.load(Ordering::Relaxed),
+            b_to_a: ba.load(Ordering::Relaxed),
+            err,
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use super::copy_pair;
+    use super::{copy_pair, RelayEnd};
     use std::io::{self, ErrorKind};
     use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
     use tokio::io::unix::AsyncFd;
@@ -58,14 +135,10 @@ mod linux {
 
     enum LoopErr {
         Fallback { a: TcpStream, b: TcpStream },
-        Fail(io::Error),
+        Fail { err: io::Error, ab: u64, ba: u64 },
     }
 
-    pub async fn splice_or_copy(
-        a: TcpStream,
-        b: TcpStream,
-        pipe_size: usize,
-    ) -> io::Result<(u64, u64)> {
+    pub async fn splice_or_copy(a: TcpStream, b: TcpStream, pipe_size: usize) -> RelayEnd {
         let want = pipe_size.clamp(64 * 1024, 4 * 1024 * 1024) as i32;
         let pipe_ab = match create_pipe(want) {
             Ok(p) => p,
@@ -75,12 +148,38 @@ mod linux {
             Ok(p) => p,
             Err(_) => return copy_pair(a, b, pipe_size).await,
         };
-        let sock_a = to_async(a)?;
-        let sock_b = to_async(b)?;
+        let sock_a = match to_async(a) {
+            Ok(sock) => sock,
+            Err(err) => {
+                return RelayEnd {
+                    a_to_b: 0,
+                    b_to_a: 0,
+                    err: Some(err),
+                }
+            }
+        };
+        let sock_b = match to_async(b) {
+            Ok(sock) => sock,
+            Err(err) => {
+                return RelayEnd {
+                    a_to_b: 0,
+                    b_to_a: 0,
+                    err: Some(err),
+                }
+            }
+        };
         match splice_loop(sock_a, sock_b, pipe_ab, pipe_ba).await {
-            Ok(n) => Ok(n),
+            Ok((ab, ba)) => RelayEnd {
+                a_to_b: ab,
+                b_to_a: ba,
+                err: None,
+            },
             Err(LoopErr::Fallback { a, b }) => copy_pair(a, b, pipe_size).await,
-            Err(LoopErr::Fail(err)) => Err(err),
+            Err(LoopErr::Fail { err, ab, ba }) => RelayEnd {
+                a_to_b: ab,
+                b_to_a: ba,
+                err: Some(err),
+            },
         }
     }
 
@@ -231,9 +330,11 @@ mod linux {
             let before = (ab.pending, ab.total, ab.done, ba.pending, ba.total, ba.done);
 
             if let Err(e) = step(&sock_a, &sock_b, &pipe_ab, &mut ab, &mut read_a, &mut write_b) {
+                flush_pending(&sock_a, &pipe_ba, &mut ba);
                 return map_step_err(e, &ab, &ba, sock_a, sock_b);
             }
             if let Err(e) = step(&sock_b, &sock_a, &pipe_ba, &mut ba, &mut read_b, &mut write_a) {
+                flush_pending(&sock_b, &pipe_ab, &mut ab);
                 return map_step_err(e, &ab, &ba, sock_a, sock_b);
             }
             if ab.done && ba.done {
@@ -246,22 +347,55 @@ mod linux {
             let need_a = read_a || write_a;
             let need_b = read_b || write_b;
             if !need_a && !need_b {
-                return Err(LoopErr::Fail(io::Error::new(
-                    ErrorKind::Other,
-                    "splice stalled",
-                )));
+                if !ab.done {
+                    read_a = true;
+                }
+                if !ba.done {
+                    read_b = true;
+                }
+                if ab.pending > 0 {
+                    write_b = true;
+                }
+                if ba.pending > 0 {
+                    write_a = true;
+                }
+                if !read_a && !write_a && !read_b && !write_b {
+                    return Ok((ab.total, ba.total));
+                }
             }
             tokio::select! {
-                r = wait_fd(&sock_a, read_a, write_a), if need_a => {
+                r = wait_fd(&sock_a, read_a, write_a), if read_a || write_a => {
                     if let Err(e) = r {
-                        return Err(LoopErr::Fail(e));
+                        return Err(failed(e, &ab, &ba));
                     }
                 }
-                r = wait_fd(&sock_b, read_b, write_b), if need_b => {
+                r = wait_fd(&sock_b, read_b, write_b), if read_b || write_b => {
                     if let Err(e) = r {
-                        return Err(LoopErr::Fail(e));
+                        return Err(failed(e, &ab, &ba));
                     }
                 }
+            }
+        }
+    }
+
+    fn failed(err: io::Error, ab: &Half, ba: &Half) -> LoopErr {
+        LoopErr::Fail {
+            err,
+            ab: ab.total,
+            ba: ba.total,
+        }
+    }
+
+    fn flush_pending(dst: &AsyncFd<OwnedFd>, pipe: &PipeEnds, half: &mut Half) {
+        if half.pending == 0 {
+            return;
+        }
+        match splice_raw(pipe.read.as_raw_fd(), dst.as_raw_fd(), half.pending) {
+            Ok(0) | Err(_) => {}
+            Ok(n) => {
+                let n = n.min(half.pending);
+                half.pending -= n;
+                half.total += n as u64;
             }
         }
     }
@@ -276,10 +410,10 @@ mod linux {
         if is_fallback(&err, ab, ba) {
             match (from_async(sock_a), from_async(sock_b)) {
                 (Ok(a), Ok(b)) => Err(LoopErr::Fallback { a, b }),
-                _ => Err(LoopErr::Fail(err)),
+                _ => Err(failed(err, ab, ba)),
             }
         } else {
-            Err(LoopErr::Fail(err))
+            Err(failed(err, ab, ba))
         }
     }
 }

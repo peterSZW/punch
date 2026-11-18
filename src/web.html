@@ -8,9 +8,10 @@
   :root {
     --bg: #12140f;
     --bg-2: #1b1f16;
+    --bg-3: #10140c;
     --line: #31382a;
-    --text: #e4ecd8;
-    --dim: #8b967c;
+    --text: #e7eedc;
+    --dim: #8d987e;
     --lime: #d6ff4a;
     --lime-2: #edffb0;
     --bad: #ff5d3a;
@@ -20,94 +21,197 @@
   * { box-sizing: border-box; }
   html, body { margin: 0; background: var(--bg); color: var(--text); }
   body {
-    font: 14px/1.45 ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+    font: 15px/1.6 ui-sans-serif, system-ui, "PingFang SC", "Noto Sans SC", sans-serif;
     min-height: 100vh;
   }
-  header {
+  button, input, select, pre, code, table, .mono, .mark, .tabs {
+    font-family: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+  }
+  header { border-bottom: 1px solid var(--line); background: rgba(18, 20, 15, 0.94); position: sticky; top: 0; z-index: 3; }
+  .brand {
     display: flex;
     align-items: baseline;
-    gap: 18px;
-    padding: 18px 22px 14px;
-    border-bottom: 1px solid var(--line);
+    gap: 16px;
+    padding: 14px 22px 0;
   }
-  .mark { color: var(--lime); font-weight: 700; letter-spacing: 0.14em; font-size: 18px; }
-  .sub { color: var(--dim); }
-  #meta { margin-left: auto; color: var(--dim); }
-  button, input, select {
-    font: inherit;
-    color: var(--text);
-    background: #10140c;
-    border: 1px solid var(--line);
-    border-radius: 0;
-    padding: 7px 9px;
+  .mark { color: var(--lime); font-weight: 700; letter-spacing: 0.14em; font-size: 16px; }
+  .sub, #meta { color: var(--dim); font-size: 12px; }
+  #meta { margin-left: auto; }
+  #logout { margin-left: 12px; }
+  .tabs { display: flex; gap: 4px; padding: 10px 18px 0; overflow-x: auto; }
+  .tabs button {
+    background: transparent;
+    color: var(--dim);
+    border: 0;
+    border-bottom: 2px solid transparent;
+    padding: 10px 14px;
+    cursor: pointer;
+    white-space: nowrap;
   }
-  button { cursor: pointer; }
-  button:hover { border-color: var(--lime); color: var(--lime-2); }
-  button.danger:hover { border-color: var(--bad); color: var(--bad); }
-  main { padding: 18px 22px 40px; max-width: 1180px; }
-  .login {
-    max-width: 460px;
-    margin: 8vh auto 0;
+  .tabs button.on { color: var(--lime); border-bottom-color: var(--lime); }
+  .tabs button:hover { color: var(--lime-2); }
+  main { padding: 22px; max-width: 1080px; }
+  .hidden { display: none !important; }
+  h1, h2 { font-weight: 650; letter-spacing: -0.02em; }
+  h1 { margin: 0 0 8px; font-size: 22px; }
+  h2 { margin: 22px 0 8px; font-size: 16px; color: var(--lime); }
+  p { margin: 0 0 12px; }
+  .dim { color: var(--dim); }
+  .lead { color: var(--dim); max-width: 68ch; }
+  ol.steps { margin: 0; padding-left: 1.2em; max-width: 72ch; }
+  ol.steps li { margin: 0 0 8px; }
+  .login, .panel {
     border: 1px solid var(--line);
     background: var(--bg-2);
-    padding: 22px;
+    padding: 18px;
   }
-  .login h1 { margin: 0 0 8px; font-size: 16px; font-weight: 600; color: var(--lime); }
-  .login p { margin: 0 0 16px; color: var(--dim); }
-  .login input { width: 100%; margin-bottom: 12px; }
-  .hidden { display: none !important; }
-  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 14px; }
-  .card { border: 1px solid var(--line); padding: 10px 12px; background: var(--bg-2); }
-  .card .k { color: var(--dim); font-size: 12px; }
-  .card .v { font-size: 20px; margin-top: 4px; color: var(--lime-2); }
-  .grid { display: grid; grid-template-columns: 340px 1fr; gap: 12px; }
-  .panel { border: 1px solid var(--line); background: var(--bg-2); padding: 12px; }
-  .panel h2 { margin: 0 0 10px; font-size: 13px; letter-spacing: 0.08em; color: var(--lime); font-weight: 600; }
-  label { display: block; color: var(--dim); margin: 8px 0 4px; font-size: 12px; }
+  .login { max-width: 460px; }
+  .login h1 { color: var(--lime); font-size: 18px; }
+  label { display: block; color: var(--dim); margin: 12px 0 6px; font-size: 12px; }
+  input, select, button {
+    font: inherit;
+    color: var(--text);
+    background: var(--bg-3);
+    border: 1px solid var(--line);
+    padding: 8px 10px;
+  }
+  button { cursor: pointer; }
+  button:hover, .cards a:hover { border-color: var(--lime); color: var(--lime-2); }
+  button.danger:hover { border-color: var(--bad); color: var(--bad); }
+  button.primary { background: var(--lime); color: #172000; border-color: var(--lime); font-weight: 700; }
+  button.primary:hover { color: #172000; background: var(--lime-2); }
+  .login input, .stack input { width: 100%; }
+  .stack { max-width: 460px; }
   .row { display: flex; gap: 8px; }
   .row > * { flex: 1; }
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 14px 0; }
+  .card, .cards a, .callout {
+    border: 1px solid var(--line);
+    background: var(--bg-2);
+    padding: 12px 14px;
+  }
+  .card .k, .cards a span { color: var(--dim); font-size: 12px; }
+  .card .v { font-size: 22px; margin-top: 4px; color: var(--lime-2); }
+  .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .cards a { display: block; color: inherit; text-decoration: none; }
+  .cards a b { display: block; color: var(--lime); margin-bottom: 6px; }
+  .facts { display: grid; grid-template-columns: 140px 1fr; gap: 8px 14px; margin-top: 8px; }
+  .facts dt { color: var(--dim); }
+  .facts dd { margin: 0; }
+  .cmd { position: relative; margin: 0 0 12px; }
+  pre.demo {
+    margin: 0;
+    white-space: pre-wrap;
+    color: var(--lime-2);
+    background: var(--bg-3);
+    border: 1px solid var(--line);
+    padding: 14px 14px 36px;
+  }
+  .cmd button {
+    position: absolute;
+    right: 8px;
+    bottom: 8px;
+    padding: 4px 8px;
+    font-size: 12px;
+  }
   table { width: 100%; border-collapse: collapse; }
-  th, td { text-align: left; padding: 7px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
   th { color: var(--dim); font-weight: 500; font-size: 12px; }
   .bad { color: var(--bad); }
   .ok { color: var(--ok); }
   .warn { color: var(--warn); }
   .err { color: var(--bad); min-height: 1.2em; margin-top: 8px; }
-  ul.events { list-style: none; margin: 0; padding: 0; max-height: 280px; overflow: auto; }
-  ul.events li { padding: 6px 0; border-bottom: 1px solid var(--line); }
+  .good { color: var(--ok); min-height: 1.2em; margin-top: 8px; }
+  .callout { color: var(--dim); margin: 14px 0; }
+  .callout strong { color: var(--warn); }
+  ul.events { list-style: none; margin: 0; padding: 0; }
+  ul.events li { padding: 8px 0; border-bottom: 1px solid var(--line); }
   .when { color: var(--dim); }
-  @media (max-width: 900px) {
-    .stats, .grid { grid-template-columns: 1fr; }
+  .split { display: grid; grid-template-columns: 340px 1fr; gap: 12px; }
+  .empty { color: var(--dim); padding: 12px 0; }
+  @media (max-width: 800px) {
+    .stats, .cards, .split, .facts { grid-template-columns: 1fr; }
+    .brand { flex-wrap: wrap; }
     #meta { margin-left: 0; }
-    header { flex-wrap: wrap; }
+    main { padding: 16px; }
   }
 </style>
 </head>
 <body>
 <header>
-  <div class="mark">PUNCH</div>
-  <div class="sub">tcp tunnel</div>
-  <div id="meta"></div>
-  <button id="logout" class="hidden" type="button">退出</button>
+  <div class="brand">
+    <div class="mark">PUNCH</div>
+    <div class="sub">反向 TCP 隧道</div>
+    <div id="meta"></div>
+    <button id="logout" class="hidden" type="button">退出</button>
+  </div>
+  <nav class="tabs">
+    <button type="button" data-tab="guide" class="on">客户端</button>
+    <button type="button" data-tab="overview">概览</button>
+    <button type="button" data-tab="maps">映射</button>
+    <button type="button" data-tab="events">事件</button>
+    <button type="button" data-tab="settings">设置</button>
+  </nav>
 </header>
 <main>
-  <section id="login" class="login">
-    <h1>管理页</h1>
-    <p>输入配置文件里的 api key。页面和接口都在这个二进制里。</p>
+  <section data-pane="guide">
+    <h1>下载并连上服务端</h1>
+    <p class="lead">客户端装在要被访问的那台机器上，由它主动连出。服务端只负责接受访问，再让客户端去拨目标地址。下面的命令已经填好这台服务端的控制地址，密钥位置留空。</p>
+    <div class="cards">
+      <a href="/dl/punch-macos"><b>macOS</b><span>Apple 芯片。下载后执行 chmod +x。</span></a>
+      <a href="/dl/punch-linux"><b>Linux x86_64</b><span>下载后执行 chmod +x。依赖系统的 libc 和 zlib。</span></a>
+      <a href="/dl/punch-windows.exe"><b>Windows x86_64</b><span>只包含客户端。在命令提示符里直接运行。</span></a>
+    </div>
+    <h2>连接之前</h2>
+    <ol class="steps">
+      <li>选和机器对应的文件。macOS 包不能在 Intel 芯片上跑，Windows 包不能用来启动服务端。</li>
+      <li>把命令里的 <code>&lt;api-key&gt;</code> 换成管理员给你的密钥。这个页面不会写出密钥。</li>
+      <li><code>--server</code> 是控制通道，客户端只连这一个地址。数据通道在握手之后自动建立。</li>
+      <li><code>--name</code> 是这台客户端的名字。同一个名字再次连接会替换旧会话，管理页上的映射按这个名字交给它。</li>
+      <li><code>-m</code> 左边是服务端要监听的 <code>ip:port</code>，右边是客户端能访问的 <code>host:port</code>。可以写多条。</li>
+    </ol>
+    <h2>命令</h2>
+    <div class="cmd"><pre id="demo-mac" class="demo"></pre><button type="button" data-copy="demo-mac">复制</button></div>
+    <div class="cmd"><pre id="demo-linux" class="demo"></pre><button type="button" data-copy="demo-linux">复制</button></div>
+    <div class="cmd"><pre id="demo-win" class="demo"></pre><button type="button" data-copy="demo-win">复制</button></div>
+    <div class="callout"><strong>例子。</strong><code>0.0.0.0:18080=127.0.0.1:8080</code> 表示：别人访问这台服务端的 18080，流量转到客户端自己的 8080。<code>0.0.0.0</code> 对公网开放，<code>127.0.0.1</code> 只有服务端这台机器能连。目标可以是客户端能到达的任意地址，例如 <code>192.168.1.9:22</code>。目标当时没在监听，映射仍会保留，并在「事件」里记一条失败。</div>
+  </section>
+
+  <section id="login" class="login hidden">
+    <h1>登录</h1>
+    <p class="dim">输入配置文件里的 api key。它同时用于客户端和管理接口，页面不会显示当前密钥。</p>
     <input id="key" type="password" placeholder="api key" autocomplete="current-password">
-    <button id="enter" type="button">进入</button>
+    <div style="margin-top:12px"><button id="enter" class="primary" type="button">进入</button></div>
     <div id="login-err" class="err"></div>
   </section>
-  <section id="app" class="hidden">
+
+  <section data-pane="overview" class="hidden">
+    <h1>运行情况</h1>
+    <p class="lead">这些数字每两秒更新。控制通道给客户端登录，数据通道只搬流量，管理页就是现在这个网站。</p>
     <div class="stats">
-      <div class="card"><div class="k">clients</div><div class="v" id="n-clients">0</div></div>
-      <div class="card"><div class="k">mappings</div><div class="v" id="n-maps">0</div></div>
-      <div class="card"><div class="k">active</div><div class="v" id="n-active">0</div></div>
-      <div class="card"><div class="k">bytes in / out</div><div class="v" id="n-bytes">0</div></div>
+      <div class="card"><div class="k">在线客户端</div><div class="v" id="n-clients">0</div></div>
+      <div class="card"><div class="k">映射</div><div class="v" id="n-maps">0</div></div>
+      <div class="card"><div class="k">正在转发</div><div class="v" id="n-active">0</div></div>
+      <div class="card"><div class="k">入 / 出</div><div class="v" id="n-bytes">0</div></div>
     </div>
-    <div class="grid">
+    <div class="panel">
+      <dl class="facts">
+        <dt>控制通道</dt><dd id="ov-control">—</dd>
+        <dt>数据通道</dt><dd id="ov-data">—</dd>
+        <dt>管理页</dt><dd id="ov-web">—</dd>
+        <dt>数据面</dt><dd id="ov-io">—</dd>
+        <dt>已运行</dt><dd id="ov-up">—</dd>
+      </dl>
+    </div>
+    <p class="dim">入站是访问方发进来的字节，出站是目标返回的字节。Linux 上数据面是 epoll + splice，其他系统是事件循环加用户态拷贝。</p>
+  </section>
+
+  <section data-pane="maps" class="hidden">
+    <h1>端口映射</h1>
+    <p class="lead">一条映射把服务端上的一个端口交给某个在线客户端。客户端命令行带上的映射标记为 cli，在这里创建的标记为 api。cli 映射会在同名客户端重连时按它当时的命令更新；api 映射会一直留着，直到在这里关闭。</p>
+    <div class="split">
       <div class="panel">
-        <h2>开一条映射</h2>
+        <h2>新建</h2>
         <label>客户端</label>
         <select id="client"></select>
         <label>服务端监听</label>
@@ -116,48 +220,115 @@
             <option>0.0.0.0</option>
             <option>127.0.0.1</option>
           </select>
-          <input id="bind-port" inputmode="numeric" placeholder="端口">
+          <input id="bind-port" inputmode="numeric" placeholder="端口，0 表示自动">
         </div>
-        <label>客户端去连的地址</label>
+        <label>客户端去连接的地址</label>
         <input id="target" placeholder="10.0.0.8:80 或 192.168.1.9:22">
-        <div style="margin-top:12px"><button id="create" type="button">创建</button></div>
+        <div style="margin-top:14px"><button id="create" class="primary" type="button">创建</button></div>
         <div id="form-err" class="err"></div>
-        <p class="sub" style="color:var(--dim)">0.0.0.0 对外，127.0.0.1 只给这台机器。目标可以是客户端能访问的任意 IP 和端口。目标没在 listen 时，这一行会标红。</p>
       </div>
       <div class="panel">
-        <h2>事件</h2>
-        <ul id="events" class="events"></ul>
+        <h2>怎么填</h2>
+        <ol class="steps">
+          <li>先让客户端连上。下拉框里没有名字时，不能从这里新建。</li>
+          <li><code>0.0.0.0</code> 表示按服务端所在机器的网卡对外。只想给本机程序用时选 <code>127.0.0.1</code>。</li>
+          <li>监听地址必须是 IP，不能写域名。目标可以写 IP 或客户端能解析的主机名。</li>
+          <li>创建之后客户端会马上试连一次。连不上时这一行变红，映射不会被删掉。</li>
+        </ol>
       </div>
     </div>
     <div class="panel" style="margin-top:12px">
-      <h2>映射</h2>
+      <h2>现有映射</h2>
       <table>
         <thead>
           <tr><th>id</th><th>客户端</th><th>监听</th><th>目标</th><th>连接</th><th>流量</th><th>状态</th><th></th></tr>
         </thead>
         <tbody id="maps"></tbody>
       </table>
+      <div id="maps-empty" class="empty hidden">还没有映射。</div>
     </div>
-    <div class="panel" style="margin-top:12px">
-      <h2>在线客户端</h2>
-      <table>
-        <thead><tr><th>名字</th><th>地址</th><th>空闲数据连接</th><th>上线</th></tr></thead>
-        <tbody id="clients"></tbody>
-      </table>
+  </section>
+
+  <section data-pane="events" class="hidden">
+    <h1>事件</h1>
+    <p class="lead">只保留最近的记录。同一句错误五秒内不会重复出现，失败次数仍会增加。</p>
+    <div class="panel">
+      <ul class="steps">
+        <li><code>client_online</code> / <code>client_offline</code>：客户端连上或断开。</li>
+        <li><code>bind_fail</code>：服务端没能听这个端口，常见原因是端口已被占用。</li>
+        <li><code>listen_fail</code>：目标没有进程在监听，连接被拒绝。</li>
+        <li><code>target_error</code>：目标地址解析失败、超时或网络不可达。</li>
+      </ul>
+      <ul id="events" class="events"></ul>
+      <div id="events-empty" class="empty hidden">还没有事件。</div>
     </div>
+  </section>
+
+  <section data-pane="settings" class="hidden">
+    <h1>设置</h1>
+    <p class="lead">api key 同时给客户端的 <code>--key</code> 和管理页使用。改完会写回服务器上的配置文件，并立刻生效，不需要重启。</p>
+    <div class="panel stack">
+      <label>新的 api key</label>
+      <input id="new-key" type="password" autocomplete="new-password" placeholder="至少 8 个字符">
+      <label>再输入一次</label>
+      <input id="new-key-2" type="password" autocomplete="new-password">
+      <div style="margin-top:14px"><button id="save-key" class="primary" type="button">保存</button></div>
+      <div id="key-err" class="err"></div>
+      <div id="key-ok" class="good"></div>
+    </div>
+    <div class="callout"><strong>保存之后。</strong>已经连着的客户端不会被踢掉，下次重连必须用新密钥。其他打开着的管理页会在下一次刷新时退出。当前密钥不会显示在页面上，请自己保管新密钥。</div>
   </section>
 </main>
 <script>
 const $ = (id) => document.getElementById(id);
 const store = "punch.apiKey";
+const tabStore = "punch.tab";
+const punchPort = __PUNCH_PORT__;
+const endpoint = location.hostname + ":" + punchPort;
+const locked = { overview: 1, maps: 1, events: 1, settings: 1 };
+
+function clientCmd(bin, name) {
+  return bin + " client --server " + endpoint + " --key <api-key> --name " + name + " -m 0.0.0.0:18080=127.0.0.1:8080";
+}
+
+$("demo-mac").textContent = "# macOS（Apple 芯片）\nchmod +x punch-macos\n" + clientCmd("./punch-macos", "mac");
+$("demo-linux").textContent = "# Linux x86_64\nchmod +x punch-linux\n" + clientCmd("./punch-linux", "linux");
+$("demo-win").textContent = "# Windows x86_64\n" + clientCmd("punch-windows.exe", "win");
 
 function key() { return sessionStorage.getItem(store) || ""; }
 
-function showApp(on) {
-  $("login").classList.toggle("hidden", on);
-  $("app").classList.toggle("hidden", !on);
+function showAuth(on) {
   $("logout").classList.toggle("hidden", !on);
+  if (!on) $("meta").textContent = "";
 }
+
+function selectTab(name) {
+  if (!document.querySelector('[data-pane="' + name + '"]')) name = "guide";
+  sessionStorage.setItem(tabStore, name);
+  document.querySelectorAll("[data-tab]").forEach((b) => b.classList.toggle("on", b.dataset.tab === name));
+  const needLogin = !!locked[name] && !key();
+  $("login").classList.toggle("hidden", !needLogin);
+  document.querySelectorAll("[data-pane]").forEach((pane) => {
+    pane.classList.toggle("hidden", needLogin || pane.dataset.pane !== name);
+  });
+}
+
+document.querySelectorAll("[data-tab]").forEach((b) => {
+  b.onclick = () => selectTab(b.dataset.tab);
+});
+
+document.querySelectorAll("[data-copy]").forEach((b) => {
+  b.onclick = async () => {
+    const text = $(b.dataset.copy).textContent;
+    try {
+      await navigator.clipboard.writeText(text);
+      b.textContent = "已复制";
+    } catch (e) {
+      b.textContent = "复制失败";
+    }
+    setTimeout(() => { b.textContent = "复制"; }, 1200);
+  };
+});
 
 async function api(path, opt) {
   opt = opt || {};
@@ -175,7 +346,8 @@ async function api(path, opt) {
   }
   if (res.status === 401) {
     sessionStorage.removeItem(store);
-    showApp(false);
+    showAuth(false);
+    selectTab(sessionStorage.getItem(tabStore) || "guide");
     throw new Error("api key 无效");
   }
   if (!res.ok) throw new Error((data && data.error) || res.statusText);
@@ -187,7 +359,7 @@ function bytes(n) {
   const u = ["B", "KB", "MB", "GB", "TB"];
   let i = 0;
   while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
-  return (i === 0 ? n.toFixed(0) : n.toFixed(1)) + u[i];
+  return (i === 0 ? n.toFixed(0) : n.toFixed(1)) + " " + u[i];
 }
 
 function when(ms) {
@@ -195,6 +367,15 @@ function when(ms) {
   const d = new Date(ms);
   const p = (n) => String(n).padStart(2, "0");
   return p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
+}
+
+function uptime(ms) {
+  const s = Math.floor((Number(ms) || 0) / 1000);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (h > 48) return Math.floor(h / 24) + " 天 " + (h % 24) + " 小时";
+  if (h > 0) return h + " 小时 " + m + " 分";
+  return m + " 分 " + (s % 60) + " 秒";
 }
 
 function el(tag, text, cls) {
@@ -215,7 +396,12 @@ async function refresh() {
   $("n-maps").textContent = ov.mappings;
   $("n-active").textContent = ov.active;
   $("n-bytes").textContent = bytes(ov.bytes_in) + " / " + bytes(ov.bytes_out);
-  $("meta").textContent = ov.io + "  ·  " + ov.control;
+  $("ov-control").textContent = ov.control + "    客户端 --server 使用的端口";
+  $("ov-data").textContent = ov.data + "    客户端自动连接，不用写在命令里";
+  $("ov-web").textContent = ov.web;
+  $("ov-io").textContent = ov.io;
+  $("ov-up").textContent = uptime(ov.uptime_ms);
+  $("meta").textContent = ov.io;
 
   const sel = $("client");
   const cur = sel.value;
@@ -227,16 +413,24 @@ async function refresh() {
     sel.appendChild(o);
   });
   if ([...sel.options].some((o) => o.value === cur)) sel.value = cur;
+  if (!sel.options.length) {
+    const o = document.createElement("option");
+    o.value = "";
+    o.textContent = "没有在线客户端";
+    sel.appendChild(o);
+  }
 
   const tb = $("maps");
   tb.replaceChildren();
-  (maps.mappings || []).forEach((m) => {
+  const rows = maps.mappings || [];
+  $("maps-empty").classList.toggle("hidden", rows.length > 0);
+  rows.forEach((m) => {
     const tr = document.createElement("tr");
-    const status = m.last_error ? m.last_error : (m.client_online ? "up" : "client offline");
+    const status = m.last_error ? m.last_error : (m.client_online ? "正常" : "客户端不在线");
     const clsName = m.last_error ? "bad" : (m.client_online ? "ok" : "warn");
     [
       String(m.id),
-      m.client_name + (m.origin === "api" ? " · api" : ""),
+      m.client_name + (m.origin === "api" ? " · api" : " · cli"),
       m.bind,
       m.target,
       String(m.active) + " / " + String(m.accepts),
@@ -256,20 +450,14 @@ async function refresh() {
     tb.appendChild(tr);
   });
 
-  const cb = $("clients");
-  cb.replaceChildren();
-  (cls.clients || []).forEach((c) => {
-    const tr = document.createElement("tr");
-    [c.name, c.addr, String(c.pool_idle), when(c.connected_ms)].forEach((t) => tr.appendChild(el("td", t)));
-    cb.appendChild(tr);
-  });
-
   const ul = $("events");
   ul.replaceChildren();
-  (ev.events || []).slice(0, 40).forEach((e) => {
+  const events = ev.events || [];
+  $("events-empty").classList.toggle("hidden", events.length > 0);
+  events.slice(0, 40).forEach((e) => {
     const li = document.createElement("li");
     li.appendChild(el("span", when(e.ts_ms) + "  ", "when"));
-    const hot = e.kind === "listen_fail" || e.kind === "bind_fail";
+    const hot = e.kind === "listen_fail" || e.kind === "bind_fail" || e.kind === "target_error";
     li.appendChild(el("span", e.kind + "  " + (e.client_name || "") + "  " + e.message, hot ? "bad" : ""));
     ul.appendChild(li);
   });
@@ -277,10 +465,12 @@ async function refresh() {
 
 $("enter").onclick = async () => {
   sessionStorage.setItem(store, $("key").value.trim());
+  $("key").value = "";
   $("login-err").textContent = "";
   try {
     await api("/api/ping");
-    showApp(true);
+    showAuth(true);
+    selectTab(sessionStorage.getItem(tabStore) || "overview");
     await refresh();
   } catch (e) {
     $("login-err").textContent = e.message;
@@ -289,7 +479,8 @@ $("enter").onclick = async () => {
 
 $("logout").onclick = () => {
   sessionStorage.removeItem(store);
-  showApp(false);
+  showAuth(false);
+  selectTab("guide");
 };
 
 $("create").onclick = async () => {
@@ -313,17 +504,38 @@ $("create").onclick = async () => {
   }
 };
 
-$("key").addEventListener("keydown", (e) => { if (e.key === "Enter") $("enter").click(); });
+$("save-key").onclick = async () => {
+  $("key-err").textContent = "";
+  $("key-ok").textContent = "";
+  const a = $("new-key").value.trim();
+  const b = $("new-key-2").value.trim();
+  if (a.length < 8) { $("key-err").textContent = "至少 8 个字符"; return; }
+  if (a !== b) { $("key-err").textContent = "两次输入不一致"; return; }
+  try {
+    await api("/api/key", { method: "POST", body: { api_key: a } });
+    sessionStorage.setItem(store, a);
+    $("new-key").value = "";
+    $("new-key-2").value = "";
+    $("key-ok").textContent = "已写入配置并立即生效。请自行保管新密钥，页面不会再显示它。";
+  } catch (e) {
+    $("key-err").textContent = e.message;
+  }
+};
 
+$("key").addEventListener("keydown", (e) => { if (e.key === "Enter") $("enter").click(); });
+$("new-key-2").addEventListener("keydown", (e) => { if (e.key === "Enter") $("save-key").click(); });
+
+if (key()) showAuth(true);
+selectTab(sessionStorage.getItem(tabStore) || "guide");
 if (key()) {
-  showApp(true);
   refresh().catch((e) => {
-    showApp(false);
+    showAuth(false);
     $("login-err").textContent = e.message;
+    selectTab(sessionStorage.getItem(tabStore) || "guide");
   });
 }
 setInterval(() => {
-  if (!$("app").classList.contains("hidden")) refresh().catch(() => {});
+  if (key()) refresh().catch(() => {});
 }, 2000);
 </script>
 </body>

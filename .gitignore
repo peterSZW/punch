@@ -2,3 +2,4 @@
 /punch-server.yaml
 /certs/
 /deploy.local.env
+/dist/
